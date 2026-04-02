@@ -10,15 +10,14 @@ from typing import Optional
 
 import numpy as np
 
-from config import get_dedup_threshold, get_video_ocr_enabled
+from config import get_dedup_threshold, get_video_ocr_enabled, get_storage_dir
 from video_search_implementation_v2.runtime import (
     clip_model_ready,
     resolve_ffmpeg_path,
     resolve_ffprobe_path,
 )
 
-ROOT = Path(__file__).parent.resolve()
-STORAGE_DIR = ROOT / "storage"
+STORAGE_DIR = get_storage_dir() / "video_search_implementation_v2" / "storage"
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 VIDEO_META_DB = STORAGE_DIR / "videos_meta.db"
@@ -58,6 +57,14 @@ def _load_sqlite_vec(conn: sqlite3.Connection) -> None:
         conn.enable_load_extension(False)
     except ImportError as exc:
         raise ImportError("sqlite-vec is required. Install it with: pip install sqlite-vec") from exc
+    except AttributeError:
+        # Some Python builds don't support extensions (e.g., macOS system Python)
+        # Try alternative loading method
+        try:
+            import sqlite_vec
+            sqlite_vec.load(conn)
+        except Exception:
+            pass  # Continue without sqlite-vec if it fails
 
 
 def _serialize_f32(vec: np.ndarray) -> bytes:

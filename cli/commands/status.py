@@ -16,7 +16,7 @@ if str(_SDK_ROOT) not in sys.path:
     sys.path.insert(0, str(_SDK_ROOT))
 
 from video_search_implementation_v2.runtime import video_runtime_status
-from config import get_enable_code, get_watch_directories
+from config import get_enable_code, get_watch_directories, get_storage_dir
 
 
 def _count(db: Path, query: str) -> int:
@@ -29,12 +29,15 @@ def _count(db: Path, query: str) -> int:
         return -1
 
 
-def _count_total_bytes(db: Path, table: str, col: str) -> int:
+def _count_total_bytes(db: Path, table: str, col: str, where_clause: str = "") -> int:
     if not db.exists():
         return -1
     try:
         with sqlite3.connect(str(db)) as conn:
-            result = conn.execute(f"SELECT SUM(LENGTH({col})) FROM {table}").fetchone()[0]
+            query = f"SELECT SUM(LENGTH({col})) FROM {table}"
+            if where_clause:
+                query += f" {where_clause}"
+            result = conn.execute(query).fetchone()[0]
             return int(result) if result else 0
     except Exception:
         return -1
@@ -136,10 +139,11 @@ def run_status(port: int = DEFAULT_PORT) -> None:
 
     section("Index Progress", "Indexed item counts by modality.")
 
-    text_db = sdk_root / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db"
-    image_db = sdk_root / "image_search_implementation_v2" / "storage" / "images_meta.db"
-    video_db = sdk_root / "video_search_implementation_v2" / "storage" / "videos_meta.db"
-    code_db = sdk_root / "storage" / "code_index_layer1.db"
+    storage_dir = get_storage_dir()
+    text_db = storage_dir / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db"
+    image_db = storage_dir / "image_search_implementation_v2" / "storage" / "images_meta.db"
+    video_db = storage_dir / "video_search_implementation_v2" / "storage" / "videos_meta.db"
+    code_db = storage_dir / "storage" / "code_index_layer1.db"
 
     text_total = _count(text_db, "SELECT COUNT(*) FROM files WHERE LOWER(category) NOT IN ('audio', 'video_transcript')")
     audio_total = _count(text_db, "SELECT COUNT(*) FROM files WHERE LOWER(category)='audio'")
@@ -199,7 +203,9 @@ def run_status(port: int = DEFAULT_PORT) -> None:
     section("Token Optimization", "Estimated token reduction from ContextCore indexing.")
 
     text_bytes = _count_total_bytes(text_db, "files", "content")
-    image_bytes = _count_total_bytes(image_db, "images", "ocr_text")
+    audio_bytes = _count_total_bytes(text_db, "files", "content", "WHERE LOWER(category)='audio'")
+    doc_bytes = _count_total_bytes(text_db, "files", "content", "WHERE LOWER(category) NOT IN ('audio', 'video_transcript')")
+    image_ocr_bytes = _count_total_bytes(image_db, "images", "ocr_text")
     video_desc_bytes = _count_total_bytes(video_db, "frames", "description")
     video_ocr_bytes = _count_total_bytes(video_db, "frames", "ocr_text")
     video_bytes = video_desc_bytes + video_ocr_bytes
@@ -207,7 +213,7 @@ def run_status(port: int = DEFAULT_PORT) -> None:
     code_lines, code_symbols = _count_code_tokens(code_db)
 
     token_table = Table(show_header=True, header_style="title", box=None, padding=(0, 2))
-    token_table.add_column("Source", style="bold", width=16)
+    token_table.add_column("Source", style="bold", width=18)
     token_table.add_column("Naive Tokens", width=14, justify="right")
     token_table.add_column("ContextCore Tokens", width=20, justify="right")
     token_table.add_column("Saved", width=12, justify="right")
@@ -217,8 +223,9 @@ def run_status(port: int = DEFAULT_PORT) -> None:
     total_optimized = 0
 
     rows_data = [
-        ("Text Content", text_bytes, True),
-        ("Images (OCR)", image_bytes, True),
+        ("Text/Documents", doc_bytes, True),
+        ("Audio", audio_bytes, True),
+        ("Images (OCR)", image_ocr_bytes, True),
         ("Video Descriptions", video_desc_bytes, True),
         ("Video OCR", video_ocr_bytes, True),
         ("Code", code_lines * 2 if code_lines > 0 else 0, False),

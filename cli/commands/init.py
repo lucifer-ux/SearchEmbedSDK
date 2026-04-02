@@ -575,13 +575,10 @@ def _run_modify_existing(existing_cfg: dict[str, object]) -> None:
     enable_audio = "audio" in selected or "video" in selected
     enable_video = "video" in selected
 
-    storage_default = str(existing_cfg.get("storage_path") or get_storage_path())
+    # Always use ~/.contextcore for consistent storage location
+    storage_path = Path.home() / ".contextcore" / "index.db"
     section("Storage setup")
-    storage_raw = questionary.text("Index storage path", default=storage_default, style=_STYLE).ask()
-    if storage_raw is None or not storage_raw.strip():
-        error("Setup cancelled.")
-        return
-    storage_path = Path(storage_raw).expanduser().resolve()
+    info(f"Using storage path: {storage_path}")
 
     models_ready = _download_models(need_clip=enable_image, need_whisper=enable_audio)
     if not models_ready:
@@ -787,32 +784,11 @@ def run_init() -> None:
 
     # ── Step 3: Storage location ──────────────────────────────────────────────
     section("Storage setup")
-    console.print("[dim]ContextCore stores your index locally.[/dim]\n")
+    console.print("[dim]ContextCore stores your index locally in ~/.contextcore[/dim]\n")
 
-    storage_choices = {
-        "~/.contextcore/index.db   [dim](recommended)[/dim]":      Path.home() / ".contextcore" / "index.db",
-        f"{watch_dir}/.contextcore/index.db":                      watch_dir / ".contextcore" / "index.db",
-        "Enter a custom path":                                       None,
-    }
-
-    storage_choice = questionary.select(
-        "Where should the index live?",
-        choices=list(storage_choices.keys()),
-        style=_STYLE,
-    ).ask()
-
-    if storage_choice is None:
-        error("Setup cancelled.")
-        return
-
-    if "custom" in storage_choice.lower():
-        custom_storage = questionary.text("Enter full path for index.db:", style=_STYLE).ask()
-        if not custom_storage:
-            error("No path given. Setup cancelled.")
-            return
-        storage_path = Path(custom_storage).expanduser().resolve()
-    else:
-        storage_path = list(storage_choices.values())[list(storage_choices.keys()).index(storage_choice)]
+    # Always use ~/.contextcore for consistent storage location
+    storage_path = Path.home() / ".contextcore" / "index.db"
+    info(f"Index will be stored at: {storage_path}")
 
     # ── Step 4: Model downloads ───────────────────────────────────────────────
     models_ready = _download_models(need_clip=enable_image, need_whisper=enable_audio)

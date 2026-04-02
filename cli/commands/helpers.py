@@ -18,7 +18,7 @@ _SDK_ROOT = get_sdk_root()
 if str(_SDK_ROOT) not in sys.path:
     sys.path.insert(0, str(_SDK_ROOT))
 
-from config import update_config_values
+from config import update_config_values, get_storage_dir
 from config import get_code_directories, get_enable_code, add_watch_directory, get_watch_directories
 from video_search_implementation_v2.runtime import (
     persist_resolved_video_tools,
@@ -87,11 +87,11 @@ def run_index(target: str | None = None) -> None:
         console.print("  [dim]Retry the backend in a new terminal:[/dim] [bold]contextcore serve[/bold]")
         return
 
-    sdk_root = get_sdk_root()
-    text_db = sdk_root / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db"
-    image_db = sdk_root / "image_search_implementation_v2" / "storage" / "images_meta.db"
-    video_db = sdk_root / "video_search_implementation_v2" / "storage" / "videos_meta.db"
-    code_db = sdk_root / "storage" / "code_index_layer1.db"
+    storage_dir = get_storage_dir()
+    text_db = storage_dir / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db"
+    image_db = storage_dir / "image_search_implementation_v2" / "storage" / "images_meta.db"
+    video_db = storage_dir / "video_search_implementation_v2" / "storage" / "videos_meta.db"
+    code_db = storage_dir / "storage" / "code_index_layer1.db"
 
     def count_rows(db: Path, query: str, fallback: int = -1) -> int:
         if not db.exists():

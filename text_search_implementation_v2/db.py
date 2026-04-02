@@ -1,10 +1,15 @@
 # text_search_implementation_v2/db.py
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Optional
 
-DATA_DIR = Path(__file__).parent / "storage"
-DATA_DIR.mkdir(exist_ok=True)
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+from config import get_storage_dir
+
+DATA_DIR = get_storage_dir() / "text_search_implementation_v2" / "storage"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "text_search_implementation_v2.db"
 
 def get_conn():

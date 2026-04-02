@@ -20,6 +20,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(_ROOT))
+from config import get_storage_dir
+
 
 TEXT_EXTS = {
     ".txt",

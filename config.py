@@ -208,21 +208,10 @@ def get_organized_root() -> Path:
 def get_storage_dir() -> Path:
     """
     Return the global storage directory where index.db lives.
-    Precedence: contextcore.yaml → CONTEXTCORE_STORAGE_DIR env → ~/.contextcore
+    Always uses ~/.contextcore for consistency.
     """
-    cfg = _load_config()
-    yaml_dir = cfg.get("storage_dir")
-    if yaml_dir:
-        return Path(yaml_dir).expanduser().resolve()
-
-    env = os.getenv("CONTEXTCORE_STORAGE_DIR")
-    if env:
-        return Path(env).expanduser().resolve()
-
-    yaml_path = cfg.get("storage_path")
-    if yaml_path:
-        return Path(yaml_path).expanduser().resolve().parent
-
+    # Always use ~/.contextcore to ensure consistent storage location
+    # This prevents confusion when searching and indexing use different paths
     return Path.home() / ".contextcore"
 
 
