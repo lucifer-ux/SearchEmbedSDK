@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "contextcore"
-version = "0.1.0"
+version = "1.0.0"
 description = "Unified local search and indexing for Claude and other AI tools"
 readme = "README.md"
 license = "AGPL-3.0-only"

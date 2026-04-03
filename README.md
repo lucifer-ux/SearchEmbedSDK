@@ -17,7 +17,7 @@ and send only what matters to AI.
 Install from PyPI:
 
 ```powershell
-python -m pip install contextcore==0.1.0
+python -m pip install contextcore==1.0.0
 ```
 
 Optional source install (for contributors):
@@ -383,7 +383,7 @@ Cause:
 Fix:
 
 ```powershell
-python -m pip install contextcore==0.1.0
+python -m pip install contextcore==1.0.0
 ```
 
 ### 2. `contextcore init` fails on import errors
@@ -396,7 +396,7 @@ Fix:
 
 ```powershell
 python -m pip install --upgrade pip
-python -m pip install --force-reinstall contextcore==0.1.0
+python -m pip install --force-reinstall contextcore==1.0.0
 ```
 
 If you are developing from source instead of PyPI:
