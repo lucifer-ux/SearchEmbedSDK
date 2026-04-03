@@ -3,7 +3,7 @@ from pathlib import Path
 import sys
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
-from config import get_organized_root, get_image_directory
+from config import get_organized_root, get_image_directory, get_storage_dir
 
 BASE_DIR = get_organized_root()
 try:
@@ -11,10 +11,10 @@ try:
 except ValueError:
     IMAGE_FOLDER = get_image_directory()
 
-DATA_DIR = Path(__file__).parent / "storage"
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR = get_storage_dir() / "image_search_implementation_v2" / "storage"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-DB_PATH = DATA_DIR / "images_v2.db"
+DB_PATH = DATA_DIR / "images_meta.db"
 EMBEDDINGS_DIR = DATA_DIR / "embeddings"
 EMBEDDINGS_DIR.mkdir(parents=True, exist_ok=True)
 ANNOY_INDEX_PATH = DATA_DIR / "annoy_index.ann"

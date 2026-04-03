@@ -57,11 +57,16 @@ REQUEST_TIMEOUT = float(os.getenv("CONTEXTCORE_MCP_TIMEOUT_SECONDS", str(DEFAULT
 PROJECT_ROOT = Path(__file__).resolve().parent
 RETRIEVAL_BUDGET_MAX_CALLS = int(os.getenv("CONTEXTCORE_RETRIEVAL_BUDGET", "4"))
 
+# Import config for storage path
+sys.path.insert(0, str(PROJECT_ROOT))
+from config import get_storage_dir
+_STORAGE_DIR = get_storage_dir()
+
 mcp = FastMCP(SERVER_NAME, json_response=True)
 _BUDGET_LOCK = threading.Lock()
 _SESSION_BUDGETS: dict[str, int] = {}
 _SESSION_LAST_QUERY: dict[str, str] = {}
-_FEEDBACK_DB = PROJECT_ROOT / "storage" / "mcp_feedback.db"
+_FEEDBACK_DB = _STORAGE_DIR / "storage" / "mcp_feedback.db"
 
 LOCAL_FILESYSTEM_TOOLS = {
     "claude-code",
@@ -874,7 +879,7 @@ def fetch_content(
 def _fetch_image_content(image_path: str) -> dict[str, Any]:
     """Retrieve indexed OCR context for an image when available."""
     try:
-        image_db = PROJECT_ROOT / "image_search_implementation_v2" / "storage" / "images_v2.db"
+        image_db = _STORAGE_DIR / "image_search_implementation_v2" / "storage" / "images_meta.db"
         if not image_db.exists():
             return {
                 "ok": True,
@@ -928,7 +933,7 @@ def _fetch_image_content(image_path: str) -> dict[str, Any]:
 def _fetch_video_content(video_path: str) -> dict[str, Any]:
     """Retrieve indexed frame descriptions and transcript for a video."""
     try:
-        video_db = PROJECT_ROOT / "video_search_implementation_v2" / "storage" / "videos_meta.db"
+        video_db = _STORAGE_DIR / "video_search_implementation_v2" / "storage" / "videos_meta.db"
         if not video_db.exists():
             return {"ok": False, "error": "video_index_not_found"}
 
@@ -962,7 +967,7 @@ def _fetch_video_content(video_path: str) -> dict[str, Any]:
         # Try to get transcript from text FTS
         transcript = None
         try:
-            text_db = PROJECT_ROOT / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db"
+            text_db = _STORAGE_DIR / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db"
             if text_db.exists():
                 tconn = sqlite3.connect(str(text_db))
                 tconn.row_factory = sqlite3.Row
@@ -994,7 +999,7 @@ def _fetch_video_content(video_path: str) -> dict[str, Any]:
 def _fetch_text_content(file_path: str) -> dict[str, Any]:
     """Retrieve indexed text content for a file."""
     try:
-        text_db = PROJECT_ROOT / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db"
+        text_db = _STORAGE_DIR / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db"
         if not text_db.exists():
             return {"ok": False, "error": "text_index_not_found"}
 
@@ -1332,9 +1337,9 @@ def list_sources() -> dict[str, Any]:
         base_dir = "."
         folders_cfg = {}
 
-    text_db = PROJECT_ROOT / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db"
-    image_db = PROJECT_ROOT / "image_search_implementation_v2" / "storage" / "images_v2.db"
-    video_db = PROJECT_ROOT / "video_search_implementation_v2" / "storage" / "videos_meta.db"
+    text_db = _STORAGE_DIR / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db"
+    image_db = _STORAGE_DIR / "image_search_implementation_v2" / "storage" / "images_meta.db"
+    video_db = _STORAGE_DIR / "video_search_implementation_v2" / "storage" / "videos_meta.db"
 
     text_total = _safe_sql_count(text_db, "SELECT COUNT(*) FROM files")
     audio_total = _safe_sql_count(text_db, "SELECT COUNT(*) FROM files WHERE LOWER(category) = 'audio'")

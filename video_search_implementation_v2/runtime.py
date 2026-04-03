@@ -11,10 +11,10 @@ from config import (
     get_ffmpeg_path,
     get_ffprobe_path,
     update_config_values,
+    get_storage_dir,
 )
 
-ROOT = Path(__file__).parent.resolve()
-STORAGE_DIR = ROOT / "storage"
+STORAGE_DIR = get_storage_dir() / "video_search_implementation_v2" / "storage"
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 RUNTIME_STATE_PATH = STORAGE_DIR / "runtime_state.json"
 CLIP_MODEL_ID = "openai/clip-vit-base-patch32"

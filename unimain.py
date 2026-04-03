@@ -41,6 +41,7 @@ from config import (
     get_enable_audio,
     get_enable_video,
     get_enable_code,
+    get_storage_dir,
 )
 from cli.lifecycle import acquire_index_lock, index_lock_active, release_index_lock, update_index_state
 
@@ -65,7 +66,8 @@ HOTSPOT_SSID = "RadxaSetup"
 HOTSPOT_PASSWORD = "radxa1234"
 HOTSPOT_IP = "10.99.0.1/24"
 
-IMAGE_INDEX_DIR  = ROOT / "image_search_implementation_v2" / "storage"
+STORAGE_DIR      = get_storage_dir()
+IMAGE_INDEX_DIR  = STORAGE_DIR / "image_search_implementation_v2" / "storage"
 IMAGE_INDEX_DIR.mkdir(parents=True, exist_ok=True)
 IMAGE_META_DB    = IMAGE_INDEX_DIR / "images_meta.db"
 IMAGE_EMBED_DIR  = IMAGE_INDEX_DIR / "embeddings"
@@ -193,7 +195,7 @@ GENERATED_DIR_NAMES = {
     "dist", "build", "out", "target", "coverage", ".cache", ".parcel-cache", ".next", ".nuxt", ".svelte-kit"
 }
 
-CODE_INDEX_DB = ROOT / "storage" / "code_index_layer1.db"
+CODE_INDEX_DB = STORAGE_DIR / "storage" / "code_index_layer1.db"
 CODE_INDEX_MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024
 CODE_TEXT_EXTENSIONS = {
     ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
@@ -222,6 +224,19 @@ _watch_worker_thread: Optional[threading.Thread] = None
 _watch_observer = None
 _watch_debounce_lock = threading.Lock()
 _watch_last_job: dict[tuple[str, str], float] = {}
+
+# Watcher logging
+_WATCHER_LOG_PATH = get_storage_dir() / "watcher.log"
+
+def _watcher_log(msg: str) -> None:
+    """Log watcher events to file for debugging."""
+    from datetime import datetime
+    timestamp = datetime.now().isoformat()
+    try:
+        with open(_WATCHER_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {msg}\n")
+    except Exception:
+        pass  # Fail silently if logging fails
 
 # NOTE: No idle-unload — whichever family is loaded stays loaded
 #       until the OTHER family is explicitly requested.
@@ -600,10 +615,18 @@ def _get_image_conn():
 def init_image_meta_db():
     conn = _get_image_conn()
     conn.execute("""CREATE TABLE IF NOT EXISTS images (
-        id       INTEGER PRIMARY KEY AUTOINCREMENT,
-        path     TEXT UNIQUE,
-        mtime    REAL,
-        annoy_id INTEGER
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        path TEXT UNIQUE,
+        filename TEXT,
+        mtime REAL,
+        has_ocr INTEGER DEFAULT 0,
+        ocr_text TEXT DEFAULT '',
+        annoy_id INTEGER,
+        embedding_path TEXT,
+        embedding_hash TEXT
+    )""")
+    conn.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS images_fts USING fts5(
+        filename, ocr_text, content='images', content_rowid='id', tokenize='porter'
     )""")
     conn.commit()
     conn.close()
@@ -618,11 +641,13 @@ def get_known_images():
 
 
 def add_or_update_image(path: str, mtime: float, annoy_id: Optional[int]):
+    from pathlib import Path
+    filename = Path(path).name
     conn = _get_image_conn()
-    conn.execute("""INSERT INTO images (path, mtime, annoy_id) VALUES (?, ?, ?)
+    conn.execute("""INSERT INTO images (path, filename, mtime, annoy_id) VALUES (?, ?, ?, ?)
         ON CONFLICT(path) DO UPDATE
-        SET mtime=excluded.mtime, annoy_id=excluded.annoy_id""",
-        (path, mtime, annoy_id))
+        SET filename=excluded.filename, mtime=excluded.mtime, annoy_id=excluded.annoy_id""",
+        (path, filename, mtime, annoy_id))
     conn.commit()
     conn.close()
 
@@ -842,46 +867,73 @@ def _content_watch_worker():
 def start_content_watcher():
     global _watch_worker_thread, _watch_observer
 
+    _watcher_log("start_content_watcher() called")
+
     if _watch_worker_thread is not None and _watch_worker_thread.is_alive():
-        print("watcher already running")
+        msg = "watcher already running"
+        print(msg)
+        _watcher_log(msg)
         return
 
     try:
         from watchdog.events import FileSystemEventHandler
         from watchdog.observers import Observer
+        _watcher_log("watchdog imported successfully")
     except Exception as exc:
-        print(f"watcher disabled: watchdog unavailable: {exc}")
+        msg = f"watcher disabled: watchdog unavailable: {exc}"
+        print(msg)
+        _watcher_log(msg)
         return
 
     class ContentEventHandler(FileSystemEventHandler):
         def on_created(self, event):
             if not event.is_directory:
+                msg = f"Watcher: file created: {event.src_path}"
+                print(f"👁️  {msg}")
+                _watcher_log(msg)
                 _route_watch_event(event.src_path)
 
         def on_modified(self, event):
             if not event.is_directory:
+                msg = f"Watcher: file modified: {event.src_path}"
+                print(f"👁️  {msg}")
+                _watcher_log(msg)
                 _route_watch_event(event.src_path)
 
         def on_moved(self, event):
             if not event.is_directory:
+                msg = f"Watcher: file moved: {event.dest_path}"
+                print(f"👁️  {msg}")
+                _watcher_log(msg)
                 _route_watch_event(event.dest_path)
 
+    _watcher_log("Starting worker thread and observer")
     _watch_stop_event.clear()
     _watch_worker_thread = threading.Thread(target=_content_watch_worker, daemon=True, name="contextcore-watcher")
     _watch_worker_thread.start()
+    _watcher_log("Worker thread started")
 
     _watch_observer = Observer()
     handler = ContentEventHandler()
     watch_dirs = get_watch_directories()
+    _watcher_log(f"Watch directories: {watch_dirs}")
     started = 0
     for watch_dir in watch_dirs:
         if watch_dir.is_dir():
             _watch_observer.schedule(handler, str(watch_dir), recursive=True)
-            print(f"watching directory: {watch_dir}")
+            msg = f"watching directory: {watch_dir}"
+            print(msg)
+            _watcher_log(msg)
             started += 1
+        else:
+            msg = f"watch directory not found: {watch_dir}"
+            print(msg)
+            _watcher_log(msg)
 
     if started == 0:
-        print("watcher not started: no valid watch directories")
+        msg = "watcher not started: no valid watch directories"
+        print(msg)
+        _watcher_log(msg)
         _watch_stop_event.set()
         if _watch_worker_thread is not None:
             _watch_worker_thread.join(timeout=2)
@@ -891,7 +943,9 @@ def start_content_watcher():
 
     _watch_observer.daemon = True
     _watch_observer.start()
-    print("content watcher started")
+    msg = "content watcher started successfully"
+    print(msg)
+    _watcher_log(msg)
 
 
 def stop_content_watcher():
@@ -1276,9 +1330,9 @@ def scan_code_index_wrapper(path: Optional[str] = None) -> dict[str, Any]:
                         "build": {"status": "skipped_not_code_directory", "analysis": analysis},
                     }
                 )
-        storage_dir = ROOT / "storage"
-        storage_dir.mkdir(parents=True, exist_ok=True)
-        report_path = storage_dir / "code_index_analysis_latest.json"
+        report_storage_dir = STORAGE_DIR / "storage"
+        report_storage_dir.mkdir(parents=True, exist_ok=True)
+        report_path = report_storage_dir / "code_index_analysis_latest.json"
         report_path.write_text(json.dumps({"reports": reports}, indent=2), encoding="utf-8")
         if len(reports) == 1:
             return {"status": "ok", "analysis": reports[0]["analysis"], "build": reports[0]["build"], "report_path": str(report_path)}
@@ -2449,9 +2503,13 @@ async def startup():
 
     if os.getenv("CONTEXTCORE_ENABLE_WATCHER", "1").strip().lower() not in {"0", "false", "no"}:
         try:
+            print("🔍 Starting content watcher...")
             start_content_watcher()
+            print(f"✅ Watcher started: observer={_watch_observer}, worker={_watch_worker_thread}")
         except Exception as e:
             print(f"⚠️ watcher startup failed: {e}")
+            import traceback
+            traceback.print_exc()
 
     if os.getenv("CONTEXTCORE_STARTUP_SCAN", "1").strip().lower() not in {"0", "false", "no"}:
         threading.Thread(target=_startup_catchup_scan, daemon=True, name="contextcore-startup-scan").start()
@@ -2761,9 +2819,9 @@ def index_code_analyze(
         raise HTTPException(403, "Path not allowed")
 
     result = analyze_code_directory(root, threshold=threshold, max_scan_files=max_scan_files)
-    storage_dir = ROOT / "storage"
-    storage_dir.mkdir(parents=True, exist_ok=True)
-    report_path = storage_dir / "code_index_analysis_latest.json"
+    report_storage_dir = STORAGE_DIR / "storage"
+    report_storage_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_storage_dir / "code_index_analysis_latest.json"
     report_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
     result["report_path"] = str(report_path)
     return result
