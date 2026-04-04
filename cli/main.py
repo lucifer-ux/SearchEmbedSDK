@@ -22,8 +22,6 @@ app = typer.Typer(
 )
 
 
-# â”€â”€ contextcore init â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 @app.command()
 def init():
     """
@@ -35,8 +33,6 @@ def init():
     from cli.commands.init import run_init
     run_init()
 
-
-# â”€â”€ contextcore status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.command()
 def status(
@@ -51,7 +47,6 @@ def status(
     run_status(port=port)
 
 
-# â”€â”€ contextcore index â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.command(name="index")
 def index_cmd(
@@ -71,8 +66,6 @@ def index_cmd(
     from cli.commands.helpers import run_index
     run_index(target=target)
 
-
-# â”€â”€ contextcore search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.command()
 def search():
@@ -100,8 +93,6 @@ def add_folder_cmd(
     run_add_folder(path=path, index_now=not no_index)
 
 
-# â”€â”€ contextcore install â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 @app.command()
 def install(
     model: str = typer.Argument(
@@ -123,8 +114,6 @@ def install(
     from cli.commands.helpers import run_install
     run_install(model=model)
 
-
-# â”€â”€ contextcore register â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.command()
 def register(
@@ -197,9 +186,6 @@ def update(
 
     run_update(restart_server=restart)
 
-
-# â”€â”€ contextcore doctor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 @app.command()
 def doctor():
     """
@@ -211,9 +197,6 @@ def doctor():
     """
     from cli.commands.doctor import run_doctor
     run_doctor()
-
-
-# â”€â”€ contextcore serve â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.command()
 def serve(
@@ -283,20 +266,18 @@ def restart_cmd(
     run_server(action="restart", port=port)
 
 
-# â”€â”€ Entrypoint â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 @app.command(name="uninstall")
 def uninstall_cmd(
     yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be removed."),
     remove_package: bool = typer.Option(
-        False,
-        "--remove-package",
+        True,
+        "--remove-package/--no-remove-package",
         help="Also run pip uninstall for contextcore after cleanup.",
     ),
     purge_model_cache: bool = typer.Option(
-        False,
-        "--purge-model-cache",
+        True,
+        "--purge-model-cache/--keep-model-cache",
         help="Also remove local Hugging Face/Torch model cache folders.",
     ),
 ):
@@ -321,13 +302,13 @@ def remove_cmd(
     yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be removed."),
     remove_package: bool = typer.Option(
-        False,
-        "--remove-package",
+        True,
+        "--remove-package/--no-remove-package",
         help="Also run pip uninstall for contextcore after cleanup.",
     ),
     purge_model_cache: bool = typer.Option(
-        False,
-        "--purge-model-cache",
+        True,
+        "--purge-model-cache/--keep-model-cache",
         help="Also remove local Hugging Face/Torch model cache folders.",
     ),
 ):
@@ -342,6 +323,34 @@ def remove_cmd(
         remove_package=remove_package,
         purge_model_cache=purge_model_cache,
     )
+
+@app.command(name="cloudconnect")
+def cloud_connect_cmd():
+    """
+    [bold]Connect cloud storage services to ContextCore.[/bold]
+
+    Use rclone to link Google Drive, OneDrive, Dropbox, Box, S3, and WebDAV
+    accounts to ContextCore for unified search across local and cloud files.
+
+    Example:
+      contextcore cloudconnect
+    """
+    from cli.commands.cloudconnect import run_cloud_connect
+    run_cloud_connect()
+
+@app.command(name="clouddisconnect")
+def cloud_disconnect_cmd():
+    """
+    [bold]Disconnect cloud storage services from ContextCore.[/bold]
+
+    Use rclone to unlink Google Drive, OneDrive, Dropbox, Box, S3, and WebDAV
+    accounts from ContextCore.
+
+    Example:
+      contextcore clouddisconnect
+    """
+    from cli.commands.clouddisconnect import run_cloud_disconnect
+    run_cloud_disconnect()
 
 def main() -> None:
     app()

@@ -11,6 +11,7 @@ __pycache__/
 .venv-test/
 venv/
 env/
+myvenv/
 ENV/
 **/.venv/
 **/.venv-test/

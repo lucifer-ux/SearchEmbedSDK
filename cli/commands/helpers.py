@@ -18,7 +18,7 @@ _SDK_ROOT = get_sdk_root()
 if str(_SDK_ROOT) not in sys.path:
     sys.path.insert(0, str(_SDK_ROOT))
 
-from config import update_config_values, get_storage_dir
+from config import update_config_values, get_storage_dir, get_storage_path
 from config import get_code_directories, get_enable_code, add_watch_directory, get_watch_directories
 from video_search_implementation_v2.runtime import (
     persist_resolved_video_tools,
@@ -184,28 +184,36 @@ def run_add_folder(path: str, index_now: bool = True) -> None:
 
 def reset_index_artifacts() -> None:
     sdk_root = get_sdk_root()
-    paths = [
-        sdk_root / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db",
-        sdk_root / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db-shm",
-        sdk_root / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db-wal",
-        sdk_root / "image_search_implementation_v2" / "storage" / "images_meta.db",
-        sdk_root / "image_search_implementation_v2" / "storage" / "annoy_index.ann",
-        sdk_root / "video_search_implementation_v2" / "storage" / "videos_meta.db",
-        sdk_root / "video_search_implementation_v2" / "storage" / "videos_meta.db-shm",
-        sdk_root / "video_search_implementation_v2" / "storage" / "videos_meta.db-wal",
-        sdk_root / "video_search_implementation_v2" / "storage" / "runtime_state.json",
-        sdk_root / "storage" / "code_index_layer1.db",
-        sdk_root / "storage" / "code_index_layer1.db-shm",
-        sdk_root / "storage" / "code_index_layer1.db-wal",
-        sdk_root / "storage" / "code_index_analysis_latest.json",
-    ]
+    storage_dir = get_storage_dir()
+    legacy_storage_dir = get_storage_path().expanduser().resolve().parent
+    candidate_roots = [storage_dir, legacy_storage_dir, sdk_root]
+    paths: list[Path] = []
+    for root in candidate_roots:
+        paths.extend(
+            [
+                root / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db",
+                root / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db-shm",
+                root / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db-wal",
+                root / "image_search_implementation_v2" / "storage" / "images_meta.db",
+                root / "image_search_implementation_v2" / "storage" / "annoy_index.ann",
+                root / "video_search_implementation_v2" / "storage" / "videos_meta.db",
+                root / "video_search_implementation_v2" / "storage" / "videos_meta.db-shm",
+                root / "video_search_implementation_v2" / "storage" / "videos_meta.db-wal",
+                root / "video_search_implementation_v2" / "storage" / "runtime_state.json",
+                root / "storage" / "code_index_layer1.db",
+                root / "storage" / "code_index_layer1.db-shm",
+                root / "storage" / "code_index_layer1.db-wal",
+                root / "storage" / "code_index_analysis_latest.json",
+            ]
+        )
     for path in paths:
         path.unlink(missing_ok=True)
-    embed_dir = sdk_root / "image_search_implementation_v2" / "storage" / "embeddings"
-    if embed_dir.exists():
-        for child in embed_dir.iterdir():
-            if child.is_file():
-                child.unlink(missing_ok=True)
+    for root in candidate_roots:
+        embed_dir = root / "image_search_implementation_v2" / "storage" / "embeddings"
+        if embed_dir.exists():
+            for child in embed_dir.iterdir():
+                if child.is_file():
+                    child.unlink(missing_ok=True)
 
 
 _INSTALL_GROUPS = {
@@ -518,6 +526,8 @@ def run_uninstall(
             return
 
     contextcore_home = Path.home() / ".contextcore"
+    storage_dir = get_storage_dir()
+    legacy_storage_dir = get_storage_path().expanduser().resolve().parent
     sdk_root = get_sdk_root()
     removed: list[str] = []
     skipped: list[str] = []
@@ -606,6 +616,8 @@ def run_uninstall(
 
     data_targets = [
         contextcore_home,
+        storage_dir,
+        legacy_storage_dir,
         sdk_root / "storage",
         sdk_root / "text_search_implementation_v2" / "storage",
         sdk_root / "image_search_implementation_v2" / "storage",
@@ -619,9 +631,23 @@ def run_uninstall(
     if purge_model_cache:
         section("Purge Model Cache")
         model_cache_targets = [
-            Path.home() / ".cache" / "huggingface" / "hub",
-            Path.home() / ".cache" / "torch" / "hub",
+            Path.home() / ".cache" / "huggingface",
+            Path.home() / ".cache" / "torch",
+            Path.home() / "AppData" / "Local" / "huggingface",
+            Path.home() / "AppData" / "Local" / "torch",
         ]
+        hf_home = os.getenv("HF_HOME")
+        if hf_home:
+            model_cache_targets.append(Path(hf_home).expanduser())
+        hf_hub_cache = os.getenv("HF_HUB_CACHE")
+        if hf_hub_cache:
+            model_cache_targets.append(Path(hf_hub_cache).expanduser())
+        transformers_cache = os.getenv("TRANSFORMERS_CACHE")
+        if transformers_cache:
+            model_cache_targets.append(Path(transformers_cache).expanduser())
+        torch_home = os.getenv("TORCH_HOME")
+        if torch_home:
+            model_cache_targets.append(Path(torch_home).expanduser())
         for target in model_cache_targets:
             _remove_path(target)
 
