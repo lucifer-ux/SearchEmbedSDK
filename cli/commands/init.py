@@ -535,6 +535,26 @@ def _apply_autostart_choice(should_install: bool) -> None:
             console.print("  [dim]Retry with:[/dim] [bold]contextcore init[/bold]")
 
 
+def _optional_cloud_connect_step(default: bool = False) -> None:
+    section("Optional: Cloud storage")
+    console.print("[dim]Connect cloud storage now?[/dim]")
+    connect_now = questionary.confirm(
+        "Set up cloud storage now?",
+        default=default,
+        style=_STYLE,
+    ).ask()
+    if not connect_now:
+        info("Skipping cloud setup for now. You can run [bold]contextcore cloudconnect[/bold] anytime.")
+        return
+    try:
+        from cli.commands.cloudconnect import run_cloud_connect
+
+        run_cloud_connect()
+    except Exception as exc:
+        warning(f"Cloud setup failed: {exc}")
+        console.print("  [dim]Retry later with:[/dim] [bold]contextcore cloudconnect[/bold]")
+
+
 def _run_modify_existing(existing_cfg: dict[str, object]) -> None:
     watch_dirs = _current_watch_dirs(existing_cfg)
     current_paths = ";".join(str(p) for p in watch_dirs)
@@ -635,6 +655,8 @@ def _run_modify_existing(existing_cfg: dict[str, object]) -> None:
                 success(f"Updated MCP config for {tool}")
             else:
                 error(f"Could not update {tool} config. Run  contextcore doctor  for help.")
+
+    _optional_cloud_connect_step(default=False)
 
     _start_server_and_scan(
         None,
@@ -910,6 +932,7 @@ def run_init() -> None:
                 console.print(f"  [dim]Retry MCP check:[/dim] [bold]{sys.executable} \"{mcp_script}\" --help[/bold]")
 
     # ── Step 7: Kick off initial index ────────────────────────────────────────
+    _optional_cloud_connect_step(default=False)
     section("Starting initial index...")
     console.print(f"  [dim]Scanning [bold]{watch_dir}[/bold]...[/dim]")
 

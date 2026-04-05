@@ -8,6 +8,7 @@ import requests
 from pathlib import Path
 
 import questionary
+from rich.table import Table
 from cli.constants import DEFAULT_PORT
 from cli.ui import console
 
@@ -112,27 +113,110 @@ def _display_results(results: dict) -> list:
         display_name = category_names.get(category, category.capitalize())
         console.print(f"\n[bold cyan]{display_name} ({len(items)})[/bold cyan]")
 
+        if category == "text":
+            local_items = []
+            cloud_items = []
+            for item in items[:40]:
+                path = item.get("path", "")
+                filename = item.get("filename", Path(path).name if path else "Unknown")
+                score = item.get("score", 0)
+                cloud_url = item.get("cloud_url")
+                source = (item.get("source") or "").lower().strip()
+                item_category = (item.get("category") or "").lower().strip()
+                row = {
+                    "path": path,
+                    "filename": filename,
+                    "category": category,
+                    "score": score,
+                    "cloud_url": cloud_url,
+                    "source": source,
+                }
+                if source == "cloud" or item_category == "cloud_text":
+                    cloud_items.append(row)
+                else:
+                    local_items.append(row)
+
+            local_items = local_items[:20]
+            cloud_items = cloud_items[:20]
+
+            table = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 2))
+            table.add_column(f"Local Text ({len(local_items)})")
+            table.add_column(f"Cloud Text ({len(cloud_items)})")
+
+            row_count = max(len(local_items), len(cloud_items), 1)
+            for i in range(row_count):
+                left_cell = ""
+                right_cell = ""
+
+                if i < len(local_items):
+                    l = local_items[i]
+                    all_items.append(l)
+                    idx = len(all_items)
+                    left_cell = f"[bold]{idx}.[/bold] {l['filename']}\n[dim]{l['path']}[/dim]\n[dim]Score: {float(l['score']):.2f}[/dim]"
+
+                if i < len(cloud_items):
+                    c = cloud_items[i]
+                    all_items.append(c)
+                    idx = len(all_items)
+                    right_cell = f"[bold]{idx}.[/bold] {c['filename']}\n[dim]{c['path']}[/dim]\n[dim]Score: {float(c['score']):.2f}[/dim]"
+                    if c.get("cloud_url"):
+                        right_cell += f"\n[dim]Cloud Link: {c['cloud_url']}[/dim]"
+
+                table.add_row(left_cell, right_cell)
+
+            console.print(table)
+            continue
+
         for item in items[:20]:
             if category == "video":
                 path = item.get("video_path", "")
             else:
                 path = item.get("path", "")
-            
+
             filename = item.get("filename", Path(path).name if path else "Unknown")
             score = item.get("score", 0)
+            cloud_url = item.get("cloud_url")
+            source = item.get("source")
 
-            all_items.append({"path": path, "filename": filename, "category": category, "score": score})
+            all_items.append(
+                {
+                    "path": path,
+                    "filename": filename,
+                    "category": category,
+                    "score": score,
+                    "cloud_url": cloud_url,
+                    "source": source,
+                }
+            )
             idx = len(all_items)
 
             console.print(f"  [bold]{idx}.[/bold] {filename}")
             console.print(f"      [dim]{path}[/dim]")
             console.print(f"      [dim]Score: {score:.2f}[/dim]")
+            if cloud_url:
+                console.print(f"      [dim]Cloud Link: {cloud_url}[/dim]")
 
     return all_items
 
 
 def _open_item(item: dict):
     path = item.get("path", "")
+    cloud_url = item.get("cloud_url", "")
+    source = (item.get("source") or "").lower().strip()
+    category = (item.get("category") or "").lower().strip()
+
+    if source == "cloud" or category == "cloud_text":
+        if cloud_url:
+            try:
+                webbrowser.open(cloud_url)
+                console.print(f"[green]Opened cloud link:[/green] {cloud_url}")
+            except Exception as e:
+                console.print(f"[red]Failed to open cloud link:[/red] {e}")
+            return
+        console.print("[yellow]No direct cloud link available for this file.[/yellow]")
+        console.print(f"[dim]Cloud path:[/dim] {path}")
+        return
+
     if not path:
         console.print("[red]No path found for this item.[/red]")
         return

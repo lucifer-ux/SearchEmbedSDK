@@ -5,9 +5,20 @@ import shutil
 import platform
 from pathlib import Path
 import yaml
-
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
 from cli.ui import console, error, header, hint, section, success, warning
+from cli.constants import DEFAULT_PORT
 
+TEXT_EXTENSIONS = {
+    ".txt", ".md", ".json", ".csv", ".log",
+    ".xml", ".html", ".js", ".ts", ".py",
+    ".java", ".c", ".cpp", ".go", ".rs",
+    ".yaml", ".yml"
+}
 
 PROVIDERS = [
     ("drive", "Google Drive"),
@@ -19,6 +30,7 @@ PROVIDERS = [
 ]
 
 CONFIG_PATH = Path.home() / ".contextcore" / "contextcore.yaml"
+POST_CONNECT_URL = "https://4bits.co/openApp"
 
 
 # -----------------------------
@@ -160,6 +172,45 @@ def select_providers():
     error("Invalid selection")
     return None
 
+def is_text_file(path:str):
+    ext = Path(path).suffix.lower()
+    return ext in TEXT_EXTENSIONS
+
+def _trigger_cloud_index_scan(remote: str) -> None:
+    from cli.server import ensure_server
+
+    if not ensure_server(port=DEFAULT_PORT, silent=True):
+        warning("Server is not running; skipping cloud indexing trigger.")
+        return
+
+    query = urllib.parse.urlencode({"remote_name": remote})
+    url = f"http://127.0.0.1:{DEFAULT_PORT}/index/cloud/scan?{query}"
+    req = urllib.request.Request(url, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read().decode("utf-8", errors="ignore")
+            payload = json.loads(body) if body.strip() else {}
+            if payload.get("status") == "accepted":
+                success("Cloud indexing accepted in background")
+                return
+    except urllib.error.HTTPError as exc:
+        if exc.code == 409:
+            warning("Cloud indexing is already running")
+            return
+        warning(f"Cloud indexing trigger failed: HTTP {exc.code}")
+        return
+    except Exception as exc:
+        warning(f"Cloud indexing trigger failed: {exc}")
+        return
+    warning("Cloud indexing trigger returned an unexpected response")
+
+
+def _open_post_connect_url() -> None:
+    try:
+        webbrowser.open(POST_CONNECT_URL)
+        console.print(f"[dim]Opened:[/dim] {POST_CONNECT_URL}")
+    except Exception as exc:
+        warning(f"Could not open post-connect URL: {exc}")
 
 # -----------------------------
 # MAIN COMMAND
@@ -220,6 +271,9 @@ def run_cloud_connect():
 
         _save_remote(remote_name)
         success(f"{label} connected successfully")
+        _open_post_connect_url()
+        section("Starting cloud index")
+        _trigger_cloud_index_scan(remote_name)
         return
 
     # -----------------------------
@@ -244,5 +298,9 @@ def run_cloud_connect():
         error("Remote not accessible")
         return
 
-    _save_remote(selected.rstrip(":"))
+    selected_name = selected.rstrip(":")
+    _save_remote(selected_name)
     success(f"Connected to {selected}")
+    _open_post_connect_url()
+    section("Starting cloud index")
+    _trigger_cloud_index_scan(selected_name)

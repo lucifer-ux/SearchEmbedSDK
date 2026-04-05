@@ -681,6 +681,21 @@ def scan_text_index(target_dir: str | None = None):
         return {"status": "error"}
 
 
+def scan_cloud_text_index(remote_name: str | None = None, workers: int = 3):
+    try:
+        mod = __import__(
+            "cloud_text_search_implementation.index_worker", fromlist=["run_scan"]
+        )
+        if hasattr(mod, "run_scan"):
+            return mod.run_scan(remote_name=remote_name, workers=workers)
+        return {"status": "ok", "updated": False}
+    except ModuleNotFoundError:
+        return {"status": "ok", "updated": False}
+    except Exception:
+        traceback.print_exc()
+        return {"status": "error"}
+
+
 def scan_image_index(target_dir: str | Path | None = None):
     if importlib.util.find_spec("transformers") is None:
         return {
@@ -2323,7 +2338,7 @@ def run_text_search(
     exclude_sources: set[str] | None = None,
 ):
     try:
-        return get_text_engine().search(
+        local_results = get_text_engine().search(
             query=query,
             categories=None,
             top_k=top_k,
@@ -2332,6 +2347,25 @@ def run_text_search(
             chunk_overlap=chunk_overlap,
             exclude_sources=exclude_sources,
         )
+        try:
+            from cloud_text_search_implementation.search import search_cloud_text
+
+            cloud_results = search_cloud_text(
+                query=query,
+                top_k=top_k,
+                exclude_sources=exclude_sources,
+            )
+        except Exception:
+            cloud_results = []
+
+        merged = []
+        if isinstance(local_results, list):
+            merged.extend(local_results)
+        if isinstance(cloud_results, list):
+            merged.extend(cloud_results)
+
+        merged.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
+        return merged[:top_k]
     except Exception as e:
         traceback.print_exc()
         return {"error": str(e)}
@@ -2804,6 +2838,46 @@ async def index_scan(
         ("code", run_code),
     ] if f]
     return {"status": "accepted", "jobs": submitted, "target": target_dir if target_dir else "global"}
+
+
+@app.post("/index/cloud/scan")
+async def index_cloud_scan(
+    remote_name: str | None = None,
+    workers: int = Query(3, ge=1, le=8),
+):
+    selected_remote = (remote_name or "").strip() or None
+    lock_target = selected_remote or "configured_remote"
+    acquired, state = acquire_index_lock("cloud_scan", [lock_target], ["cloud_text"])
+    if not acquired:
+        return JSONResponse(
+            status_code=409,
+            content={"status": "busy", "jobs": ["cloud_text"], "target": lock_target, "state": state},
+        )
+
+    async def _do_cloud_scan():
+        try:
+            update_index_state(progress={"stage": "running", "current_modality": "cloud_text", "completed_modalities": []})
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: scan_cloud_text_index(remote_name=selected_remote, workers=workers),
+            )
+            update_index_state(
+                progress={
+                    "stage": "completed",
+                    "current_modality": "cloud_text",
+                    "completed_modalities": ["cloud_text"],
+                    "last_result": {"cloud_text": result},
+                }
+            )
+            release_index_lock(result="completed")
+            return
+        except Exception as e:
+            release_index_lock(result="failed", error=str(e))
+            raise
+
+    asyncio.ensure_future(_do_cloud_scan())
+    return {"status": "accepted", "jobs": ["cloud_text"], "target": lock_target}
 
 
 @app.post("/index/code/analyze")
