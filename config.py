@@ -130,8 +130,12 @@ def _nested_get(cfg: Dict[str, Any], dotted_key: str, default: Any = None) -> An
 def get_video_directories() -> list[Path]:
     """
     Return video watch directories.
-    Precedence: contextcore.yaml → CONTEXTCORE_VIDEO_DIR env → CWD.
+    Precedence: CONTEXTCORE_VIDEO_DIR env -> contextcore.yaml -> CWD.
     """
+    env = os.getenv("CONTEXTCORE_VIDEO_DIR")
+    if env:
+        return [Path(env).expanduser().resolve()]
+
     cfg = _load_config()
     yaml_dirs = cfg.get("video_directories")
     if yaml_dirs:
@@ -139,10 +143,6 @@ def get_video_directories() -> list[Path]:
             return [Path(d).expanduser().resolve() for d in yaml_dirs]
         if isinstance(yaml_dirs, str):
             return [Path(yaml_dirs).expanduser().resolve()]
-
-    env = os.getenv("CONTEXTCORE_VIDEO_DIR")
-    if env:
-        return [Path(env).expanduser().resolve()]
 
     return [Path.cwd()]
 
@@ -170,16 +170,16 @@ def get_audio_directories() -> list[Path]:
 def get_image_directory() -> Path:
     """
     Return image root directory.
-    Precedence: contextcore.yaml → CONTEXTCORE_IMAGE_DIR env → CWD.
+    Precedence: CONTEXTCORE_IMAGE_DIR env -> contextcore.yaml -> CWD.
     """
+    env = os.getenv("CONTEXTCORE_IMAGE_DIR")
+    if env:
+        return Path(env).expanduser().resolve()
+
     cfg = _load_config()
     yaml_dir = cfg.get("organized_root")
     if yaml_dir:
         return Path(yaml_dir).expanduser().resolve()
-
-    env = os.getenv("CONTEXTCORE_IMAGE_DIR")
-    if env:
-        return Path(env).expanduser().resolve()
 
     return Path.cwd()
 
@@ -208,10 +208,17 @@ def get_organized_root() -> Path:
 def get_storage_dir() -> Path:
     """
     Return the global storage directory where index.db lives.
-    Always uses ~/.contextcore for consistency.
+    Precedence: CONTEXTCORE_STORAGE_DIR env -> contextcore.yaml -> ~/.contextcore.
     """
-    # Always use ~/.contextcore to ensure consistent storage location
-    # This prevents confusion when searching and indexing use different paths
+    env = os.getenv("CONTEXTCORE_STORAGE_DIR")
+    if env:
+        return Path(env).expanduser().resolve()
+
+    cfg = _load_config()
+    yaml_dir = cfg.get("storage_dir")
+    if yaml_dir:
+        return Path(yaml_dir).expanduser().resolve()
+
     return Path.home() / ".contextcore"
 
 

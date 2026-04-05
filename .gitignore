@@ -53,6 +53,7 @@ desktop.ini
 .idea/
 *.swp
 *.swo
+node_modules/
 .thumbnails/
 .opencode/
 opencode.json

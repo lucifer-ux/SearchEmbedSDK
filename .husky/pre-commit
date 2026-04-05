@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+set -e
+
+if [ -x "./.venv/bin/python" ]; then
+  PYTHON_CMD="./.venv/bin/python"
+elif [ -x "./venv/bin/python" ]; then
+  PYTHON_CMD="./venv/bin/python"
+elif [ -x "./myvenv/Scripts/python.exe" ]; then
+  PYTHON_CMD="./myvenv/Scripts/python.exe"
+elif command -v python >/dev/null 2>&1; then
+  PYTHON_CMD="python"
+elif command -v py >/dev/null 2>&1; then
+  PYTHON_CMD="py"
+else
+  echo "Python interpreter not found for pytest hook."
+  exit 1
+fi
+
+"$PYTHON_CMD" -m pytest tests/ -v --timeout=60 --tb=short

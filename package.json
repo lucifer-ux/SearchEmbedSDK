@@ -1,0 +1,11 @@
+{
+  "name": "search-embed-sdk",
+  "private": true,
+  "scripts": {
+    "prepare": "husky",
+    "test:pytest": "python -m pytest tests/ -v --timeout=60 --tb=short"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7"
+  }
+}
