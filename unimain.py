@@ -196,6 +196,10 @@ GENERATED_DIR_NAMES = {
 }
 
 CODE_INDEX_DB = STORAGE_DIR / "storage" / "code_index_layer1.db"
+CODE_CHUNK_ANNOY_PATH = STORAGE_DIR / "storage" / "code_chunks.ann"
+CODE_CHUNK_ANNOY_STATE_PATH = STORAGE_DIR / "storage" / "code_chunks_annoy_state.json"
+CODE_CHUNK_LINES = 80
+CODE_CHUNK_OVERLAP = 20
 CODE_INDEX_MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024
 CODE_TEXT_EXTENSIONS = {
     ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
@@ -425,10 +429,14 @@ _annoy_index      = None
 _annoy_loaded     = False
 _annoy_needs_rebuild = False
 _text_engine      = None
+_code_chunk_annoy_index = None
+_code_chunk_annoy_loaded = False
+_code_chunk_annoy_lock = threading.Lock()
 
 
 def _unload_embed_models():
     global _clip_model, _clip_processor, _annoy_index, _annoy_loaded, _text_engine
+    global _code_chunk_annoy_index, _code_chunk_annoy_loaded
     print("🧹 Unloading embed models …")
     if _annoy_index and hasattr(_annoy_index, "unload"):
         try:
@@ -440,6 +448,8 @@ def _unload_embed_models():
     _clip_model     = None
     _clip_processor = None
     _text_engine    = None
+    _code_chunk_annoy_index = None
+    _code_chunk_annoy_loaded = False
     gc.collect()
     print("   Done")
 
@@ -1565,6 +1575,25 @@ def _init_code_index_db() -> None:
             language TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS code_chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo_path TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            start_line INTEGER NOT NULL,
+            end_line INTEGER NOT NULL,
+            chunk_text TEXT NOT NULL,
+            chunk_hash TEXT NOT NULL,
+            UNIQUE(repo_path, file_path, chunk_index)
+        );
+
+        CREATE TABLE IF NOT EXISTS code_chunk_vectors (
+            chunk_id INTEGER PRIMARY KEY,
+            vector_json TEXT NOT NULL,
+            FOREIGN KEY(chunk_id) REFERENCES code_chunks(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS external_dependencies (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             repo_path TEXT NOT NULL,
@@ -1586,6 +1615,8 @@ def _init_code_index_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_project_files_mtime ON project_files(repo_path, last_modified DESC);
         CREATE INDEX IF NOT EXISTS idx_code_symbols_repo_name ON code_symbols(repo_path, symbol_name);
         CREATE INDEX IF NOT EXISTS idx_code_symbols_repo_file ON code_symbols(repo_path, relative_path);
+        CREATE INDEX IF NOT EXISTS idx_code_chunks_repo_file ON code_chunks(repo_path, file_path);
+        CREATE INDEX IF NOT EXISTS idx_code_chunks_repo_rel ON code_chunks(repo_path, relative_path);
         CREATE INDEX IF NOT EXISTS idx_ext_deps_repo ON external_dependencies(repo_path);
         CREATE INDEX IF NOT EXISTS idx_int_deps_repo ON internal_dependencies(repo_path);
         """
@@ -1657,6 +1688,244 @@ def _safe_read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except Exception:
         return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _embed_code_text(text: str) -> list[float]:
+    from cloud_text_search_implementation.embeddings import embed_text
+
+    vec = embed_text(text or "")
+    return [float(x) for x in vec]
+
+
+def _code_chunk_annoy_default_state() -> dict[str, Any]:
+    return {"needs_rebuild": False, "last_rebuild_at": None}
+
+
+def _load_code_chunk_annoy_state() -> dict[str, Any]:
+    if not CODE_CHUNK_ANNOY_STATE_PATH.exists():
+        return _code_chunk_annoy_default_state()
+    try:
+        data = json.loads(CODE_CHUNK_ANNOY_STATE_PATH.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return _code_chunk_annoy_default_state()
+        return {
+            "needs_rebuild": bool(data.get("needs_rebuild", False)),
+            "last_rebuild_at": data.get("last_rebuild_at"),
+        }
+    except Exception:
+        return _code_chunk_annoy_default_state()
+
+
+def _save_code_chunk_annoy_state(state: dict[str, Any]) -> None:
+    CODE_CHUNK_ANNOY_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CODE_CHUNK_ANNOY_STATE_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def _mark_code_chunk_annoy_dirty() -> None:
+    state = _load_code_chunk_annoy_state()
+    state["needs_rebuild"] = True
+    _save_code_chunk_annoy_state(state)
+
+
+def _clear_code_chunk_annoy_dirty() -> None:
+    state = _load_code_chunk_annoy_state()
+    state["needs_rebuild"] = False
+    state["last_rebuild_at"] = datetime.now(timezone.utc).isoformat()
+    _save_code_chunk_annoy_state(state)
+
+
+def _code_chunk_annoy_installed() -> bool:
+    try:
+        import annoy  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def _upsert_code_chunks_for_file(
+    conn: sqlite3.Connection,
+    project_root: Path,
+    abs_path: str,
+    rel_path: str,
+    content: str,
+    chunk_lines: int = CODE_CHUNK_LINES,
+    chunk_overlap: int = CODE_CHUNK_OVERLAP,
+) -> int:
+    repo_s = str(project_root)
+    conn.execute(
+        "DELETE FROM code_chunk_vectors WHERE chunk_id IN (SELECT id FROM code_chunks WHERE repo_path=? AND file_path=?)",
+        (repo_s, abs_path),
+    )
+    conn.execute("DELETE FROM code_chunks WHERE repo_path=? AND file_path=?", (repo_s, abs_path))
+
+    chunks = _split_code_chunks_by_lines(
+        content,
+        chunk_lines=max(20, int(chunk_lines)),
+        chunk_overlap=max(0, int(chunk_overlap)),
+    )
+    inserted = 0
+    for c in chunks:
+        chunk_text = str(c.get("chunk", "")).strip()
+        if not chunk_text:
+            continue
+        chunk_hash = hashlib.sha256(chunk_text.encode("utf-8", errors="ignore")).hexdigest()
+        cur = conn.execute(
+            """
+            INSERT INTO code_chunks(
+                repo_path, file_path, relative_path, chunk_index, start_line, end_line, chunk_text, chunk_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                repo_s,
+                abs_path,
+                rel_path,
+                int(c.get("chunk_index", 0)),
+                int(c.get("start_line", 1)),
+                int(c.get("end_line", 1)),
+                chunk_text,
+                chunk_hash,
+            ),
+        )
+        chunk_id = int(cur.lastrowid)
+        vec = _embed_code_text(chunk_text)
+        conn.execute(
+            "INSERT OR REPLACE INTO code_chunk_vectors(chunk_id, vector_json) VALUES (?, ?)",
+            (chunk_id, json.dumps(vec, separators=(",", ":"))),
+        )
+        inserted += 1
+    return inserted
+
+
+def _rebuild_code_chunk_annoy_index(n_trees: int = 10) -> dict[str, Any]:
+    global _code_chunk_annoy_index, _code_chunk_annoy_loaded
+    with _code_chunk_annoy_lock:
+        if not _code_chunk_annoy_installed():
+            return {"ok": False, "error": "annoy_not_installed", "indexed_vectors": 0}
+
+        conn = _code_db_conn()
+        rows = conn.execute(
+            """
+            SELECT cc.id AS chunk_id, cv.vector_json
+            FROM code_chunks cc
+            JOIN code_chunk_vectors cv ON cv.chunk_id = cc.id
+            ORDER BY cc.id ASC
+            """
+        ).fetchall()
+        conn.close()
+
+        parsed: list[tuple[int, list[float]]] = []
+        dim = 0
+        for r in rows:
+            try:
+                vec = json.loads(r["vector_json"] or "[]")
+                if not isinstance(vec, list) or not vec:
+                    continue
+                fvec = [float(x) for x in vec]
+                if dim == 0:
+                    dim = len(fvec)
+                if len(fvec) != dim:
+                    continue
+                parsed.append((int(r["chunk_id"]), fvec))
+            except Exception:
+                continue
+
+        if dim <= 0 or not parsed:
+            if CODE_CHUNK_ANNOY_PATH.exists():
+                CODE_CHUNK_ANNOY_PATH.unlink(missing_ok=True)
+            _code_chunk_annoy_index = None
+            _code_chunk_annoy_loaded = True
+            _clear_code_chunk_annoy_dirty()
+            return {"ok": True, "indexed_vectors": 0, "index_exists": False, "ready": False}
+
+        from annoy import AnnoyIndex
+
+        ai = AnnoyIndex(dim, "angular")
+        for chunk_id, vec in parsed:
+            ai.add_item(int(chunk_id), vec)
+        ai.build(max(2, int(n_trees)))
+        CODE_CHUNK_ANNOY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ai.save(str(CODE_CHUNK_ANNOY_PATH))
+        _code_chunk_annoy_index = ai
+        _code_chunk_annoy_loaded = True
+        _clear_code_chunk_annoy_dirty()
+        return {
+            "ok": True,
+            "indexed_vectors": int(len(parsed)),
+            "index_exists": CODE_CHUNK_ANNOY_PATH.exists(),
+            "ready": True,
+        }
+
+
+def _ensure_code_chunk_annoy_ready() -> dict[str, Any]:
+    global _code_chunk_annoy_index, _code_chunk_annoy_loaded
+    if not _code_chunk_annoy_installed():
+        return {"ok": False, "error": "annoy_not_installed", "ready": False}
+
+    state = _load_code_chunk_annoy_state()
+    if bool(state.get("needs_rebuild")) or not CODE_CHUNK_ANNOY_PATH.exists():
+        return _rebuild_code_chunk_annoy_index()
+
+    if _code_chunk_annoy_loaded and _code_chunk_annoy_index is not None:
+        return {"ok": True, "ready": True, "index_exists": True}
+
+    conn = _code_db_conn()
+    row = conn.execute(
+        """
+        SELECT cv.vector_json
+        FROM code_chunk_vectors cv
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+    if not row:
+        _code_chunk_annoy_index = None
+        _code_chunk_annoy_loaded = True
+        return {"ok": True, "ready": False, "index_exists": False}
+
+    try:
+        vec = json.loads(row["vector_json"] or "[]")
+        dim = len(vec) if isinstance(vec, list) else 0
+    except Exception:
+        dim = 0
+    if dim <= 0:
+        _code_chunk_annoy_index = None
+        _code_chunk_annoy_loaded = True
+        return {"ok": True, "ready": False, "index_exists": False}
+
+    try:
+        from annoy import AnnoyIndex
+
+        ai = AnnoyIndex(dim, "angular")
+        ai.load(str(CODE_CHUNK_ANNOY_PATH))
+        _code_chunk_annoy_index = ai
+        _code_chunk_annoy_loaded = True
+        return {"ok": True, "ready": True, "index_exists": True}
+    except Exception:
+        return _rebuild_code_chunk_annoy_index()
+
+
+def _search_code_chunk_annoy(query_vector: list[float], top_k: int = 100) -> list[dict[str, float]]:
+    if not isinstance(query_vector, list) or not query_vector:
+        return []
+    ready = _ensure_code_chunk_annoy_ready()
+    if not ready.get("ok") or not ready.get("ready"):
+        return []
+    if _code_chunk_annoy_index is None:
+        return []
+    try:
+        ids, dists = _code_chunk_annoy_index.get_nns_by_vector(
+            [float(x) for x in query_vector],
+            max(1, int(top_k)),
+            include_distances=True,
+        )
+    except Exception:
+        return []
+    out: list[dict[str, float]] = []
+    for chunk_id, dist in zip(ids, dists):
+        sem = max(0.0, float(1.0 - float(dist) / 2.0))
+        out.append({"chunk_id": int(chunk_id), "distance": float(dist), "semantic_score": sem})
+    return out
 
 
 def _py_func_signature(node: ast.AST) -> str:
@@ -2021,6 +2290,7 @@ def build_code_layer1_index(path: Path, force: bool = False, max_files: int = 20
     indexed = 0
     skipped_unchanged = 0
     skipped_noncode = 0
+    code_chunks_indexed = 0
     failed = 0
     scanned = 0
     seen_abs_paths: set[str] = set()
@@ -2108,7 +2378,11 @@ def build_code_layer1_index(path: Path, force: bool = False, max_files: int = 20
                         "SELECT 1 FROM code_symbols WHERE file_path=? LIMIT 1",
                         (abs_path,),
                     ).fetchone()
-                    if has_pf and has_cs:
+                    has_chunks = conn.execute(
+                        "SELECT 1 FROM code_chunks WHERE repo_path=? AND file_path=? LIMIT 1",
+                        (str(project_root), abs_path),
+                    ).fetchone()
+                    if has_pf and has_cs and has_chunks:
                         skipped_unchanged += 1
                         continue
 
@@ -2231,6 +2505,16 @@ def build_code_layer1_index(path: Path, force: bool = False, max_files: int = 20
                     ),
                 )
 
+                code_chunks_indexed += _upsert_code_chunks_for_file(
+                    conn=conn,
+                    project_root=project_root,
+                    abs_path=abs_path,
+                    rel_path=rel_path,
+                    content=content,
+                    chunk_lines=CODE_CHUNK_LINES,
+                    chunk_overlap=CODE_CHUNK_OVERLAP,
+                )
+
                 for internal in facts.get("internal_imports", []):
                     conn.execute(
                         """
@@ -2255,6 +2539,11 @@ def build_code_layer1_index(path: Path, force: bool = False, max_files: int = 20
     stale_rows = conn.execute("SELECT abs_path FROM files WHERE repo_id=?", (repo_id,)).fetchall()
     stale_abs = [str(r["abs_path"]) for r in stale_rows if str(r["abs_path"]) not in seen_abs_paths]
     for abs_path in stale_abs:
+        conn.execute(
+            "DELETE FROM code_chunk_vectors WHERE chunk_id IN (SELECT id FROM code_chunks WHERE repo_path=? AND file_path=?)",
+            (str(project_root), abs_path),
+        )
+        conn.execute("DELETE FROM code_chunks WHERE repo_path=? AND file_path=?", (str(project_root), abs_path))
         conn.execute("DELETE FROM files WHERE abs_path=?", (abs_path,))
         conn.execute("DELETE FROM project_files WHERE file_path=?", (abs_path,))
         conn.execute("DELETE FROM code_symbols WHERE file_path=?", (abs_path,))
@@ -2305,6 +2594,8 @@ def build_code_layer1_index(path: Path, force: bool = False, max_files: int = 20
             now,
         ),
     )
+    if code_chunks_indexed > 0 or stale_abs:
+        _mark_code_chunk_annoy_dirty()
     conn.commit()
     conn.close()
 
@@ -2320,6 +2611,7 @@ def build_code_layer1_index(path: Path, force: bool = False, max_files: int = 20
         "skipped_unchanged": skipped_unchanged,
         "skipped_noncode_or_ignored": skipped_noncode,
         "failed_files": failed,
+        "code_chunks_indexed": int(code_chunks_indexed),
         "totals": {
             "file_count": total_file_count,
             "line_count": total_line_count,
@@ -3501,7 +3793,452 @@ def get_file_content_api(
     }
 
 
-# ── /image/index/status ───────────────────────────────────────
+# ── /index/code/search_chunks ────────────────────────────────
+def _code_query_tokens(query: str) -> list[str]:
+    q = (query or "").strip().lower()
+    if not q:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for tok in re.findall(r"\b\w+\b", q):
+        if len(tok) < 2:
+            continue
+        if tok in seen:
+            continue
+        seen.add(tok)
+        out.append(tok)
+    return out
+
+
+def _split_code_chunks_by_lines(text: str, chunk_lines: int, chunk_overlap: int) -> list[dict[str, Any]]:
+    lines = text.splitlines()
+    if not lines:
+        return []
+
+    step = max(1, int(chunk_lines) - int(chunk_overlap))
+    out: list[dict[str, Any]] = []
+    i = 0
+    idx = 0
+    total_lines = len(lines)
+    while i < total_lines:
+        end = min(total_lines, i + int(chunk_lines))
+        chunk_text = "\n".join(lines[i:end]).strip()
+        if chunk_text:
+            out.append(
+                {
+                    "chunk_index": idx,
+                    "start_line": i + 1,
+                    "end_line": end,
+                    "chunk": chunk_text,
+                }
+            )
+            idx += 1
+        if end >= total_lines:
+            break
+        i += step
+
+    total_chunks = len(out)
+    for c in out:
+        c["chunk_total"] = total_chunks
+    return out
+
+
+def _encode_code_chunk_id(rel_path: str, chunk_index: int, chunk_lines: int, chunk_overlap: int) -> str:
+    payload = {
+        "p": rel_path.replace("\\", "/"),
+        "idx": int(chunk_index),
+        "cl": int(chunk_lines),
+        "ov": int(chunk_overlap),
+    }
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _score_code_chunk(query: str, tokens: list[str], rel_path: str, chunk_text: str, base_score: float) -> tuple[float, list[str]]:
+    q = (query or "").strip().lower()
+    rel_l = rel_path.lower()
+    txt_l = chunk_text.lower()
+    matched_tokens: list[str] = []
+    score = float(base_score)
+
+    if q and q in rel_l:
+        score += 2.5
+    if q and q in txt_l:
+        score += 4.0
+
+    for tok in tokens:
+        path_hit = tok in rel_l
+        txt_count = txt_l.count(tok)
+        if path_hit or txt_count > 0:
+            matched_tokens.append(tok)
+        if path_hit:
+            score += 1.5
+        if txt_count > 0:
+            score += min(4, txt_count) * 0.9
+
+    return score, matched_tokens
+
+
+def _candidate_code_files_for_query(
+    conn: sqlite3.Connection,
+    repo_root: Path,
+    tokens: list[str],
+    candidate_files: int,
+) -> list[dict[str, Any]]:
+    repo_s = str(repo_root)
+    scored: dict[str, dict[str, Any]] = {}
+    tok_slice = tokens[:8]
+
+    def _upsert(file_path: str, rel_path: str, line_count: int, delta: float, reason: str) -> None:
+        key = str(file_path)
+        existing = scored.get(key)
+        if existing is None:
+            scored[key] = {
+                "file_path": str(file_path),
+                "relative_path": str(rel_path).replace("\\", "/"),
+                "line_count": int(line_count or 0),
+                "score": float(delta),
+                "reasons": [reason],
+            }
+            return
+        existing["score"] = float(existing.get("score", 0.0)) + float(delta)
+        reasons = existing.get("reasons", [])
+        if reason not in reasons:
+            reasons.append(reason)
+        existing["reasons"] = reasons
+
+    if tok_slice:
+        for tok in tok_slice:
+            like = f"%{tok}%"
+            path_rows = conn.execute(
+                """
+                SELECT file_path, relative_path, line_count
+                FROM project_files
+                WHERE repo_path = ? AND LOWER(relative_path) LIKE ?
+                ORDER BY is_entry_point DESC, last_modified DESC
+                LIMIT 300
+                """,
+                (repo_s, like),
+            ).fetchall()
+            for r in path_rows:
+                _upsert(
+                    file_path=str(r["file_path"]),
+                    rel_path=str(r["relative_path"]),
+                    line_count=int(r["line_count"] or 0),
+                    delta=2.0,
+                    reason=f"path:{tok}",
+                )
+
+            symbol_rows = conn.execute(
+                """
+                SELECT DISTINCT cs.file_path, cs.relative_path, COALESCE(pf.line_count, 0) AS line_count
+                FROM code_symbols cs
+                LEFT JOIN project_files pf ON pf.file_path = cs.file_path
+                WHERE cs.repo_path = ? AND LOWER(cs.symbol_name) LIKE ?
+                LIMIT 500
+                """,
+                (repo_s, like),
+            ).fetchall()
+            for r in symbol_rows:
+                _upsert(
+                    file_path=str(r["file_path"]),
+                    rel_path=str(r["relative_path"]),
+                    line_count=int(r["line_count"] or 0),
+                    delta=3.0,
+                    reason=f"symbol:{tok}",
+                )
+
+    fallback_rows = conn.execute(
+        """
+        SELECT file_path, relative_path, line_count
+        FROM project_files
+        WHERE repo_path = ?
+        ORDER BY is_entry_point DESC, is_test_file ASC, last_modified DESC
+        LIMIT ?
+        """,
+        (repo_s, max(200, int(candidate_files) * 2)),
+    ).fetchall()
+    for r in fallback_rows:
+        _upsert(
+            file_path=str(r["file_path"]),
+            rel_path=str(r["relative_path"]),
+            line_count=int(r["line_count"] or 0),
+            delta=0.25,
+            reason="fallback",
+        )
+
+    ranked = sorted(
+        scored.values(),
+        key=lambda x: (float(x.get("score", 0.0)), -int(x.get("line_count", 0))),
+        reverse=True,
+    )
+    return ranked[: max(10, int(candidate_files))]
+
+
+@app.get("/index/code/search_chunks")
+def search_code_chunks_api(
+    repo_path: str = Query("."),
+    query: str = Query(..., min_length=1),
+    top_k: int = Query(8, ge=1, le=50),
+    candidate_files: int = Query(200, ge=10, le=2000),
+    chunk_lines: int = Query(80, ge=20, le=400),
+    chunk_overlap: int = Query(20, ge=0, le=200),
+    max_chars: int = Query(1600, ge=200, le=4000),
+    use_semantic: bool = Query(True),
+    semantic_candidates: int = Query(240, ge=20, le=2000),
+    lexical_weight: float = Query(1.0, ge=0.0, le=10.0),
+    semantic_weight: float = Query(6.0, ge=0.0, le=20.0),
+):
+    root = Path(repo_path).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(404, "Directory not found")
+    if not _is_path_allowed(root):
+        raise HTTPException(403, "Path not allowed")
+
+    q = query.strip()
+    if not q:
+        raise HTTPException(400, "empty query")
+
+    bounded_top_k = max(1, min(int(top_k), 50))
+    bounded_candidate_files = max(10, min(int(candidate_files), 2000))
+    bounded_chunk_lines = max(20, min(int(chunk_lines), 400))
+    bounded_chunk_overlap = max(0, min(int(chunk_overlap), 200))
+    bounded_max_chars = max(200, min(int(max_chars), 4000))
+    bounded_semantic_candidates = max(20, min(int(semantic_candidates), 2000))
+
+    _init_code_index_db()
+    conn = _code_db_conn()
+    _repo_id, repo_root = _resolve_repo_id_for_path(conn, root)
+    tokens = _code_query_tokens(q)
+    candidates = _candidate_code_files_for_query(conn, repo_root, tokens, bounded_candidate_files)
+    conn.close()
+
+    merged_rows: dict[tuple[str, int], dict[str, Any]] = {}
+    scanned_files = 0
+    lexical_hits = 0
+    semantic_hits = 0
+
+    def _merge_result(
+        base: dict[str, Any],
+        *,
+        lexical_score: float,
+        semantic_score: float,
+        matched_tokens: list[str],
+        source: str,
+    ) -> None:
+        key = (str(base["relative_path"]), int(base["chunk_index"]))
+        final = (float(lexical_weight) * float(lexical_score)) + (
+            float(semantic_weight) * float(semantic_score)
+        )
+        if final <= 0.0:
+            return
+        existing = merged_rows.get(key)
+        if existing is None:
+            row = dict(base)
+            row["lexical_score"] = float(lexical_score)
+            row["semantic_score"] = float(semantic_score)
+            row["matched_tokens"] = sorted(set(matched_tokens))
+            row["retrieval_sources"] = [source]
+            row["score"] = float(final)
+            merged_rows[key] = row
+            return
+
+        existing["lexical_score"] = max(float(existing.get("lexical_score", 0.0)), float(lexical_score))
+        existing["semantic_score"] = max(float(existing.get("semantic_score", 0.0)), float(semantic_score))
+        existing["score"] = (float(lexical_weight) * float(existing["lexical_score"])) + (
+            float(semantic_weight) * float(existing["semantic_score"])
+        )
+        token_set = set(existing.get("matched_tokens", []))
+        token_set.update(matched_tokens)
+        existing["matched_tokens"] = sorted(token_set)
+        srcs = list(existing.get("retrieval_sources", []))
+        if source not in srcs:
+            srcs.append(source)
+        existing["retrieval_sources"] = srcs
+
+    for c in candidates:
+        if scanned_files >= bounded_candidate_files:
+            break
+        abs_path = Path(str(c["file_path"])).resolve()
+        if not abs_path.exists() or not abs_path.is_file():
+            continue
+        if not _is_path_allowed(abs_path):
+            continue
+
+        try:
+            content = _safe_read_text(abs_path)
+        except Exception:
+            continue
+        if not content.strip():
+            continue
+
+        rel_path = str(c["relative_path"]).replace("\\", "/")
+        chunks = _split_code_chunks_by_lines(
+            content,
+            chunk_lines=bounded_chunk_lines,
+            chunk_overlap=bounded_chunk_overlap,
+        )
+        if not chunks:
+            continue
+        scanned_files += 1
+
+        base_score = float(c.get("score", 0.0))
+        for ch in chunks:
+            score, matched = _score_code_chunk(
+                query=q,
+                tokens=tokens,
+                rel_path=rel_path,
+                chunk_text=str(ch["chunk"]),
+                base_score=base_score,
+            )
+            if score <= 0.0:
+                continue
+            if not matched and q.lower() not in str(ch["chunk"]).lower() and q.lower() not in rel_path.lower():
+                continue
+            text = str(ch["chunk"])
+            if len(text) > bounded_max_chars:
+                text = text[:bounded_max_chars].rstrip() + "\n..."
+            _merge_result(
+                {
+                    "relative_path": rel_path,
+                    "file_path": str(abs_path),
+                    "chunk": text,
+                    "chunk_index": int(ch["chunk_index"]),
+                    "chunk_total": int(ch["chunk_total"]),
+                    "start_line": int(ch["start_line"]),
+                    "end_line": int(ch["end_line"]),
+                    "chunk_id": _encode_code_chunk_id(
+                        rel_path=rel_path,
+                        chunk_index=int(ch["chunk_index"]),
+                        chunk_lines=bounded_chunk_lines,
+                        chunk_overlap=bounded_chunk_overlap,
+                    ),
+                },
+                lexical_score=float(score),
+                semantic_score=0.0,
+                matched_tokens=matched,
+                source="lexical",
+            )
+            lexical_hits += 1
+
+    semantic_state: dict[str, Any] = {"ok": False, "ready": False, "used": False}
+    if bool(use_semantic):
+        semantic_state = _ensure_code_chunk_annoy_ready()
+        if bool(semantic_state.get("ready")):
+            semantic_state["used"] = True
+            query_vec = _embed_code_text(q)
+            ann_hits = _search_code_chunk_annoy(
+                query_vector=query_vec,
+                top_k=max(bounded_semantic_candidates, bounded_top_k * 20),
+            )
+            if ann_hits:
+                hit_by_id = {int(h["chunk_id"]): float(h.get("semantic_score", 0.0)) for h in ann_hits}
+                ids = list(hit_by_id.keys())
+                rows: list[sqlite3.Row] = []
+                conn = _code_db_conn()
+                for i in range(0, len(ids), 900):
+                    part = ids[i : i + 900]
+                    if not part:
+                        continue
+                    placeholders = ",".join("?" for _ in part)
+                    rows.extend(
+                        conn.execute(
+                            f"""
+                            SELECT
+                                cc.id,
+                                cc.file_path,
+                                cc.relative_path,
+                                cc.chunk_index,
+                                cc.start_line,
+                                cc.end_line,
+                                cc.chunk_text,
+                                (
+                                    SELECT COUNT(*)
+                                    FROM code_chunks c2
+                                    WHERE c2.repo_path = cc.repo_path
+                                      AND c2.file_path = cc.file_path
+                                ) AS chunk_total
+                            FROM code_chunks cc
+                            WHERE cc.repo_path = ?
+                              AND cc.id IN ({placeholders})
+                            """,
+                            (str(repo_root), *part),
+                        ).fetchall()
+                    )
+                conn.close()
+
+                for r in rows:
+                    sem_score = float(hit_by_id.get(int(r["id"]), 0.0))
+                    if sem_score <= 0.0:
+                        continue
+                    rel_path = str(r["relative_path"]).replace("\\", "/")
+                    raw_chunk = str(r["chunk_text"] or "")
+                    lex_hint, matched = _score_code_chunk(
+                        query=q,
+                        tokens=tokens,
+                        rel_path=rel_path,
+                        chunk_text=raw_chunk,
+                        base_score=0.0,
+                    )
+                    if not matched and q.lower() not in raw_chunk.lower() and q.lower() not in rel_path.lower():
+                        continue
+                    text = raw_chunk
+                    if len(text) > bounded_max_chars:
+                        text = text[:bounded_max_chars].rstrip() + "\n..."
+                    _merge_result(
+                        {
+                            "relative_path": rel_path,
+                            "file_path": str(r["file_path"]),
+                            "chunk": text,
+                            "chunk_index": int(r["chunk_index"]),
+                            "chunk_total": int(r["chunk_total"] or 0),
+                            "start_line": int(r["start_line"] or 1),
+                            "end_line": int(r["end_line"] or 1),
+                            "chunk_id": _encode_code_chunk_id(
+                                rel_path=rel_path,
+                                chunk_index=int(r["chunk_index"]),
+                                chunk_lines=bounded_chunk_lines,
+                                chunk_overlap=bounded_chunk_overlap,
+                            ),
+                        },
+                        lexical_score=max(0.0, float(lex_hint)),
+                        semantic_score=sem_score,
+                        matched_tokens=matched,
+                        source="semantic",
+                    )
+                    semantic_hits += 1
+
+    deduped = sorted(
+        merged_rows.values(),
+        key=lambda r: float(r.get("score", 0.0)),
+        reverse=True,
+    )[:bounded_top_k]
+
+    return {
+        "ok": True,
+        "repo_path": str(repo_root),
+        "query": q,
+        "top_k": int(bounded_top_k),
+        "candidate_files": int(bounded_candidate_files),
+        "chunk_lines": int(bounded_chunk_lines),
+        "chunk_overlap": int(bounded_chunk_overlap),
+        "scanned_files": int(scanned_files),
+        "lexical_hits": int(lexical_hits),
+        "semantic_hits": int(semantic_hits),
+        "semantic": {
+            "enabled": bool(use_semantic),
+            "used": bool(semantic_state.get("used", False)),
+            "ready": bool(semantic_state.get("ready", False)),
+            "status": semantic_state,
+            "weights": {
+                "lexical": float(lexical_weight),
+                "semantic": float(semantic_weight),
+            },
+        },
+        "result_count": len(deduped),
+        "results": deduped,
+    }
+
 @app.get("/image/index/status")
 def image_index_status():
     indexed_images = 0

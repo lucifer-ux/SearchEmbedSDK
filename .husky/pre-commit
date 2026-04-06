@@ -16,4 +16,10 @@ else
   exit 1
 fi
 
+if ! "$PYTHON_CMD" -c "import pytest" >/dev/null 2>&1; then
+  echo "pytest is not installed for $PYTHON_CMD"
+  echo "Install it with: $PYTHON_CMD -m pip install pytest pytest-timeout"
+  exit 1
+fi
+
 "$PYTHON_CMD" -m pytest tests/ -v --timeout=60 --tb=short

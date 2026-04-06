@@ -28,10 +28,11 @@ Use this order unless the user explicitly asks otherwise:
 6) `prepare_file_for_tool` / `reveal_file`
    - Use when user wants to open, attach, or inspect local files in GUI tools.
 
-7) Codebase tools (`get_codebase_context`, `get_codebase_index`,
-   `get_module_detail`, `get_file_content`)
+7) Codebase tools (`search_code_chunks`, `get_codebase_context`,
+   `get_codebase_index`, `get_module_detail`, `get_file_content`)
    - Use for repository reasoning tasks.
-   - Prefer `get_codebase_context` first for comprehensive project context.
+   - Prefer `search_code_chunks` for precise, minimal snippets.
+   - Use `get_codebase_context` for broad repository orientation.
 """
 
 from __future__ import annotations
@@ -667,6 +668,46 @@ def get_file_content(
         "/index/code/get_file_content",
         params=params,
         timeout=60,
+    )
+
+
+@mcp.tool()
+def search_code_chunks(
+    repo_path: str,
+    query: str,
+    top_k: int = 8,
+    candidate_files: int = 200,
+    chunk_lines: int = 80,
+    chunk_overlap: int = 20,
+    max_chars: int = 1600,
+    use_semantic: bool = True,
+    semantic_candidates: int = 240,
+    lexical_weight: float = 1.0,
+    semantic_weight: float = 6.0,
+) -> dict[str, Any]:
+    """
+    Targeted code retrieval tool.
+    Returns only relevant code snippets with file + line ranges for the query.
+
+    Use this before broad codebase context when token budget matters.
+    """
+    return _request_json(
+        "GET",
+        "/index/code/search_chunks",
+        params={
+            "repo_path": repo_path,
+            "query": query,
+            "top_k": max(1, min(int(top_k), 50)),
+            "candidate_files": max(10, min(int(candidate_files), 2000)),
+            "chunk_lines": max(20, min(int(chunk_lines), 400)),
+            "chunk_overlap": max(0, min(int(chunk_overlap), 200)),
+            "max_chars": max(200, min(int(max_chars), 4000)),
+            "use_semantic": bool(use_semantic),
+            "semantic_candidates": max(20, min(int(semantic_candidates), 2000)),
+            "lexical_weight": max(0.0, min(float(lexical_weight), 10.0)),
+            "semantic_weight": max(0.0, min(float(semantic_weight), 20.0)),
+        },
+        timeout=120,
     )
 
 
