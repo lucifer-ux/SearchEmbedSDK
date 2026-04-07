@@ -138,6 +138,47 @@ def register(
 
 
 @app.command()
+def benchmark(
+    dataset: str = typer.Option("scifact", "--dataset", help="BEIR dataset name (default: scifact)."),
+    top_k: int = typer.Option(10, "--top-k", min=1, help="Top-k documents to retrieve per query."),
+    max_queries: int = typer.Option(0, "--max-queries", min=0, help="Optional limit for quick iterations (0 = all)."),
+    datasets_dir: str = typer.Option("", "--datasets-dir", help="Directory for BEIR datasets cache."),
+    output_json: str = typer.Option("", "--output-json", help="Optional path to save run + summary JSON."),
+    measure_tokens: bool = typer.Option(False, "--measure-tokens", help="Compute token usage reduction with tiktoken."),
+    token_encoding: str = typer.Option("cl100k_base", "--token-encoding", help="tiktoken encoding name."),
+    context_top_k: int = typer.Option(0, "--context-top-k", min=0, help="Top-k retrieved chunks to count for ContextCore tokens (0 uses --top-k)."),
+    systems: str = typer.Option(
+        "contextcore,bm25",
+        "--systems",
+        help="Comma-separated retrieval systems to evaluate. Supported: contextcore,bm25",
+    ),
+    report_csv: str = typer.Option("", "--report-csv", help="Optional CSV path for system comparison table."),
+    report_md: str = typer.Option("", "--report-md", help="Optional Markdown path for system comparison table."),
+):
+    """
+    [bold]Benchmark ContextCore retrieval on a BEIR dataset.[/bold]
+
+    Quick-start:
+      contextcore benchmark --dataset scifact
+    """
+    from cli.commands.benchmark import run_benchmark
+
+    run_benchmark(
+        dataset=dataset.strip() or "scifact",
+        top_k=top_k,
+        max_queries=max_queries,
+        datasets_dir=datasets_dir.strip() or None,
+        output_json=output_json.strip() or None,
+        measure_tokens=bool(measure_tokens),
+        token_encoding=token_encoding.strip() or "cl100k_base",
+        context_top_k=(context_top_k if context_top_k > 0 else None),
+        systems=systems.strip() or "contextcore,bm25",
+        report_csv=report_csv.strip() or None,
+        report_md=report_md.strip() or None,
+    )
+
+
+@app.command()
 def report(
     message: list[str] = typer.Argument(
         None,
