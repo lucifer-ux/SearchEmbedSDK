@@ -2628,6 +2628,9 @@ def run_text_search(
     chunk_chars: int = 900,
     chunk_overlap: int = 120,
     exclude_sources: set[str] | None = None,
+    retrieval_mode: str = "contextcore_hybrid",
+    max_context_tokens_per_result: int | None = None,
+    max_chunks_per_doc: int = 1,
 ):
     try:
         local_results = get_text_engine().search(
@@ -2638,6 +2641,9 @@ def run_text_search(
             chunk_chars=chunk_chars,
             chunk_overlap=chunk_overlap,
             exclude_sources=exclude_sources,
+            retrieval_mode=retrieval_mode,
+            max_context_tokens_per_result=max_context_tokens_per_result,
+            max_chunks_per_doc=max_chunks_per_doc,
         )
         try:
             from cloud_text_search_implementation.search import search_cloud_text
@@ -2930,6 +2936,9 @@ async def unified_search(
     text_include_metadata: bool = Query(False),
     text_chunk_chars: int = Query(900, ge=200, le=4000),
     text_chunk_overlap: int = Query(120, ge=0, le=1000),
+    text_retrieval_mode: str = Query("contextcore_hybrid"),
+    text_max_context_tokens_per_result: int | None = Query(None, ge=1, le=4000),
+    text_max_chunks_per_doc: int = Query(1, ge=1, le=4),
     exclude_sources: str | None = Query(None),
 ):
     """
@@ -2967,6 +2976,9 @@ async def unified_search(
                             text_chunk_chars,
                             text_chunk_overlap,
                             excluded,
+                            text_retrieval_mode,
+                            text_max_context_tokens_per_result,
+                            text_max_chunks_per_doc,
                         ),
                         timeout=8,
                     )
