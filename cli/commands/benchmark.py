@@ -4,7 +4,6 @@ import csv
 import json
 import math
 import os
-import re
 import shutil
 import tempfile
 import urllib.request
@@ -17,10 +16,13 @@ from cli.ui import console, error, header, info, section, success, warning
 
 
 def _dataset_url(dataset: str) -> str:
+    """Return the canonical BEIR dataset ZIP URL for a dataset name."""
     return f"https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/{dataset}.zip"
 
 
 def _download_and_unzip_dataset(dataset: str, datasets_root: Path) -> Path:
+    """Download and extract a BEIR dataset if missing, otherwise reuse local cache."""
+    # Reuse local dataset cache to keep repeated benchmark runs fast and reproducible.
     datasets_root.mkdir(parents=True, exist_ok=True)
     dataset_dir = datasets_root / dataset
     if dataset_dir.exists() and (dataset_dir / "corpus.jsonl").exists():
@@ -41,6 +43,7 @@ def _download_and_unzip_dataset(dataset: str, datasets_root: Path) -> Path:
 
 
 def _load_corpus(corpus_path: Path) -> dict[str, str]:
+    """Load corpus.jsonl as a mapping: doc_id -> combined title+text."""
     corpus: dict[str, str] = {}
     with corpus_path.open("r", encoding="utf-8") as fh:
         for line in fh:
@@ -57,6 +60,7 @@ def _load_corpus(corpus_path: Path) -> dict[str, str]:
 
 
 def _load_queries(queries_path: Path) -> dict[str, str]:
+    """Load queries.jsonl as a mapping: query_id -> query text."""
     queries: dict[str, str] = {}
     with queries_path.open("r", encoding="utf-8") as fh:
         for line in fh:
@@ -69,6 +73,7 @@ def _load_queries(queries_path: Path) -> dict[str, str]:
 
 
 def _load_qrels(qrels_path: Path) -> dict[str, dict[str, int]]:
+    """Load qrels/test.tsv into query->doc->relevance integer mapping."""
     qrels: dict[str, dict[str, int]] = {}
     with qrels_path.open("r", encoding="utf-8") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
@@ -86,16 +91,24 @@ def _load_qrels(qrels_path: Path) -> dict[str, dict[str, int]]:
 
 
 def _clear_text_db(db_module: Any) -> None:
+    """Remove previously indexed benchmark data from all text retrieval lanes."""
+    # Each benchmark run should start from a clean index state across all text lanes.
     conn = db_module.get_conn()
     try:
         with conn:
             conn.execute("DELETE FROM files_fts")
+            try:
+                conn.execute("DELETE FROM files_fts_trigram")
+            except Exception:
+                pass
             conn.execute("DELETE FROM files")
     finally:
         conn.close()
 
 
 def _index_corpus(corpus: dict[str, str], category: str = "beir") -> int:
+    """Index corpus documents through production text DB APIs using synthetic file paths."""
+    # Index BEIR docs through production DB APIs to benchmark real retrieval behavior.
     from text_search_implementation_v2 import db as text_db
 
     text_db.init_db()
@@ -118,6 +131,7 @@ def _index_corpus(corpus: dict[str, str], category: str = "beir") -> int:
 
 
 def _dcg_at_k(rels: list[int], k: int) -> float:
+    """Compute Discounted Cumulative Gain at cutoff k for graded relevance values."""
     score = 0.0
     for i, rel in enumerate(rels[:k], start=1):
         score += (float((2 ** rel) - 1)) / math.log2(i + 1)
@@ -125,6 +139,8 @@ def _dcg_at_k(rels: list[int], k: int) -> float:
 
 
 def _metrics_for_query(relevant: dict[str, int], ranked_doc_ids: list[str], k: int) -> dict[str, float]:
+    """Compute ndcg/map/recall/precision/mrr for one query at cutoff k."""
+    # Standard IR metrics computed at k (for system-to-system comparability).
     rel_set = {doc_id for doc_id, rel in relevant.items() if rel > 0}
     if not rel_set:
         return {"ndcg": 0.0, "map": 0.0, "recall": 0.0, "precision": 0.0, "mrr": 0.0}
@@ -166,10 +182,12 @@ def _metrics_for_query(relevant: dict[str, int], ranked_doc_ids: list[str], k: i
 
 
 def _mean(values: list[float]) -> float:
+    """Return arithmetic mean; 0.0 for empty input."""
     return (sum(values) / float(len(values))) if values else 0.0
 
 
 def _build_token_counter(encoding_name: str) -> Callable[[str], int] | None:
+    """Create a token-count function from a tiktoken encoding name, or None if unavailable."""
     try:
         import tiktoken  # type: ignore
 
@@ -185,6 +203,9 @@ def _baseline_tokens_for_query(
     corpus: dict[str, str],
     count_tokens: Callable[[str], int],
 ) -> int:
+    """Compute oracle token baseline: sum tokens of all qrels-relevant docs for a query."""
+    # Oracle reference: assumes perfect knowledge of relevant docs from qrels.
+    # Useful as a lower bound, not a deploy-time baseline.
     total = 0
     for doc_id, rel in (qrels.get(qid, {}) or {}).items():
         if int(rel) <= 0:
@@ -201,6 +222,8 @@ def _contextcore_tokens_for_query(
     count_tokens: Callable[[str], int],
     context_top_k: int,
 ) -> int:
+    """Compute token cost of returned chunk payloads for top-N results."""
+    # ContextCore cost: token count of returned chunk payloads (LLM-facing context).
     total = 0
     for row in results[: max(1, int(context_top_k))]:
         chunk = str(row.get("chunk") or "").strip()
@@ -223,6 +246,9 @@ def _retrieved_full_docs_tokens_for_query(
     count_tokens: Callable[[str], int],
     docs_top_k: int,
 ) -> int:
+    """Compute practical baseline: top-N retrieved documents counted as full-text context."""
+    # Practical baseline: same retrieved candidates, but with full-document context.
+    # This is the apples-to-apples baseline for token reduction claims.
     total = 0
     seen: set[str] = set()
     collected = 0
@@ -245,55 +271,30 @@ def _retrieved_full_docs_tokens_for_query(
 
 
 def _token_reduction_percent(baseline_tokens: int, context_tokens: int) -> float:
+    """Return percentage token reduction relative to a baseline token count."""
     if baseline_tokens <= 0:
         return 0.0
     return ((float(baseline_tokens) - float(context_tokens)) / float(baseline_tokens)) * 100.0
 
 
-def _split_chunks(text: str, chunk_chars: int = 900, chunk_overlap: int = 120) -> list[dict[str, Any]]:
-    if not text:
-        return []
-    step = max(1, chunk_chars - chunk_overlap)
-    out: list[dict[str, Any]] = []
-    i = 0
-    idx = 0
-    while i < len(text):
-        end = min(len(text), i + chunk_chars)
-        chunk = text[i:end].strip()
-        if chunk:
-            out.append({"index": idx, "text": chunk})
-            idx += 1
-        if end >= len(text):
-            break
-        i += step
-    return out
-
-
-def _best_chunk_text(text: str, query: str, chunk_chars: int = 900, chunk_overlap: int = 120) -> str:
-    chunks = _split_chunks(text, chunk_chars=chunk_chars, chunk_overlap=chunk_overlap)
-    if not chunks:
-        return ""
-    tokens = re.findall(r"\b\w+\b", (query or "").lower())
-    if not tokens:
-        return str(chunks[0]["text"])
-
-    def _score(c: dict[str, Any]) -> int:
-        t = str(c["text"]).lower()
-        return sum(t.count(tok) for tok in tokens)
-
-    best = max(chunks, key=_score)
-    return str(best["text"])
-
-
-def _normalize_query_for_bm25(query: str) -> str:
-    tokens = re.findall(r"\b\w+\b", (query or "").lower())
-    if not tokens:
-        return ""
-    return " OR ".join(f"{t}*" for t in tokens)
-
-
-def _search_contextcore(engine: Any, query: str, top_k: int) -> list[dict[str, Any]]:
-    rows = engine.search(query=query, top_k=top_k, include_metadata=True)
+def _search_mode(
+    engine: Any,
+    query: str,
+    top_k: int,
+    retrieval_mode: str,
+    max_chunks_per_doc: int,
+    max_context_tokens_per_result: int | None,
+) -> list[dict[str, Any]]:
+    """Run the text engine in a specific retrieval mode and normalize output shape."""
+    # Unified adapter for all benchmark systems so output shaping stays identical.
+    rows = engine.search(
+        query=query,
+        top_k=top_k,
+        include_metadata=True,
+        retrieval_mode=retrieval_mode,
+        max_chunks_per_doc=max_chunks_per_doc,
+        max_context_tokens_per_result=max_context_tokens_per_result,
+    )
     out: list[dict[str, Any]] = []
     for row in rows:
         filename = str(row.get("filename") or "")
@@ -311,47 +312,13 @@ def _search_contextcore(engine: Any, query: str, top_k: int) -> list[dict[str, A
     return out
 
 
-def _search_bm25(query: str, top_k: int) -> list[dict[str, Any]]:
-    from text_search_implementation_v2.db import get_file_metadata_by_ids, get_fts_content_by_ids, query_fts
-
-    match_q = _normalize_query_for_bm25(query)
-    if not match_q:
-        return []
-
-    rows = query_fts(match_q, limit=max(50, int(top_k) * 8))
-    ids = [int(r["id"]) for r in rows]
-    meta_map = get_file_metadata_by_ids(ids)
-    content_map = get_fts_content_by_ids(ids)
-
-    out: list[dict[str, Any]] = []
-    for r in rows:
-        fid = int(r["id"])
-        meta = meta_map.get(fid)
-        if not meta:
-            continue
-        filename = str(meta.get("filename") or "")
-        doc_id = Path(filename).stem if filename else ""
-        if not doc_id:
-            continue
-        content = str(content_map.get(fid) or "")
-        out.append(
-            {
-                "doc_id": doc_id,
-                "score": float(-float(r["score"])),
-                "filename": filename,
-                "chunk": _best_chunk_text(content, query),
-            }
-        )
-        if len(out) >= int(top_k):
-            break
-    return out
-
-
 def _write_comparison_reports(
     summaries: dict[str, dict[str, Any]],
     report_csv: str | None = None,
     report_md: str | None = None,
 ) -> list[str]:
+    """Write optional CSV/Markdown comparison tables from per-system summaries."""
+    # Export concise publication-ready comparison tables from per-system summaries.
     created: list[str] = []
     rows: list[dict[str, Any]] = []
     for system, s in summaries.items():
@@ -423,14 +390,26 @@ def _write_comparison_reports(
 
 
 def _parse_systems(raw: str | None) -> list[str]:
-    allowed = {"contextcore", "bm25"}
+    """Parse and normalize requested system names, including backward-compatible aliases."""
+    # Keep backward compatibility with older CLI aliases.
+    allowed = {"contextcore_hybrid", "bm25_only", "trigram_only"}
     parts = [p.strip().lower() for p in str(raw or "").split(",") if p.strip()]
     if not parts:
-        return ["contextcore"]
+        return ["contextcore_hybrid", "bm25_only", "trigram_only"]
+
+    aliases = {
+        "contextcore": "contextcore_hybrid",
+        "bm25": "bm25_only",
+        "trigram": "trigram_only",
+    }
+
     out: list[str] = []
     for p in parts:
+        p = aliases.get(p, p)
         if p not in allowed:
-            raise ValueError(f"Unsupported system '{p}'. Supported: contextcore,bm25")
+            raise ValueError(
+                f"Unsupported system '{p}'. Supported: contextcore_hybrid,bm25_only,trigram_only"
+            )
         if p not in out:
             out.append(p)
     return out
@@ -445,10 +424,11 @@ def run_benchmark(
     measure_tokens: bool = False,
     token_encoding: str = "cl100k_base",
     context_top_k: int | None = None,
-    systems: str = "contextcore,bm25",
+    systems: str = "contextcore_hybrid,bm25_only,trigram_only",
     report_csv: str | None = None,
     report_md: str | None = None,
 ) -> None:
+    """Execute BEIR retrieval benchmark with optional token-cost and report exports."""
     header("ContextCore Benchmark")
 
     if top_k <= 0:
@@ -518,6 +498,7 @@ def run_benchmark(
         return
 
     section("Index Corpus")
+    # Isolated storage prevents benchmark runs from modifying user index state.
     temp_root = Path(tempfile.mkdtemp(prefix=f"contextcore_beir_{dataset}_"))
     isolated_storage = temp_root / "storage"
     isolated_storage.mkdir(parents=True, exist_ok=True)
@@ -533,17 +514,50 @@ def run_benchmark(
         from text_search_implementation_v2.search import TextSearchEngineV2
 
         engine = TextSearchEngineV2()
+        active_systems = list(selected_systems)
+        # Trigram tokenizer is not guaranteed in all SQLite builds.
+        if "trigram_only" in active_systems and not bool(getattr(engine, "_trigram_enabled", False)):
+            warning("trigram_only requested but trigram tokenizer is unavailable in this SQLite build; skipping trigram_only.")
+            active_systems = [s for s in active_systems if s != "trigram_only"]
+        if not active_systems:
+            error("No active retrieval systems to evaluate.")
+            return
+
         section("Evaluate")
         system_summaries: dict[str, dict[str, Any]] = {}
         system_runs: dict[str, dict[str, Any]] = {}
 
         search_fns: dict[str, Callable[[str, int], list[dict[str, Any]]]] = {
-            "contextcore": lambda q, k: _search_contextcore(engine, q, k),
-            "bm25": _search_bm25,
+            # Retrieval mode changes candidate generation; chunk packaging stays identical.
+            "contextcore_hybrid": lambda q, k: _search_mode(
+                engine,
+                q,
+                k,
+                retrieval_mode="contextcore_hybrid",
+                max_chunks_per_doc=1,
+                max_context_tokens_per_result=None,
+            ),
+            "bm25_only": lambda q, k: _search_mode(
+                engine,
+                q,
+                k,
+                retrieval_mode="bm25_only",
+                max_chunks_per_doc=1,
+                max_context_tokens_per_result=None,
+            ),
+            "trigram_only": lambda q, k: _search_mode(
+                engine,
+                q,
+                k,
+                retrieval_mode="trigram_only",
+                max_chunks_per_doc=1,
+                max_context_tokens_per_result=None,
+            ),
         }
 
         total = len(eval_qids)
-        for system_name in selected_systems:
+        for system_name in active_systems:
+            # Per-system accumulators for quality and token-efficiency reporting.
             ndcgs: list[float] = []
             maps: list[float] = []
             recalls: list[float] = []
@@ -580,6 +594,9 @@ def run_benchmark(
                 }
 
                 if token_measurement_enabled and token_counter is not None:
+                # Persist both views so downstream reporting can choose correct comparator.
+                    # Track both token comparisons:
+                    # 1) oracle (reference lower bound), 2) retrieved full docs (publishable baseline).
                     oracle_baseline_tok = _baseline_tokens_for_query(
                         qid=qid,
                         qrels=qrels,
@@ -625,7 +642,7 @@ def run_benchmark(
                 mrrs.append(m["mrr"])
 
                 if i % 50 == 0 or i == total:
-                    info(f"[{system_name}] Evaluated {i}/{total} queries")
+                    info(f"{system_name}: Evaluated {i}/{total} queries")
 
             summary = {
                 "system": system_name,
@@ -674,7 +691,7 @@ def run_benchmark(
             system_runs[system_name] = run_rows
 
         section("Results")
-        for system_name in selected_systems:
+        for system_name in active_systems:
             summary = system_summaries[system_name]
             info(f"[bold]{system_name}[/bold]")
             success(f"NDCG@{top_k}: {summary['ndcg@k']:.4f}")
@@ -715,6 +732,7 @@ def run_benchmark(
             success(f"Saved comparison report: {p}")
 
         if output_json:
+            # JSON keeps an audit trail: summary metrics plus per-query scored runs.
             output_path = Path(output_json).expanduser().resolve()
             output_path.parent.mkdir(parents=True, exist_ok=True)
             payload: dict[str, Any] = {
@@ -724,10 +742,11 @@ def run_benchmark(
                     "dataset": dataset,
                     "top_k": int(top_k),
                     "selected_systems": selected_systems,
+                    "active_systems": active_systems,
                 },
             }
-            if len(selected_systems) == 1:
-                single = selected_systems[0]
+            if len(active_systems) == 1:
+                single = active_systems[0]
                 payload["summary"] = system_summaries[single]
                 payload["run"] = system_runs[single]
             output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

@@ -12,10 +12,45 @@ from __future__ import annotations
 from typing import Optional
 import typer
 from cli.constants import DEFAULT_PORT
+from cli.strings import (
+    APP_HELP,
+    APP_NAME,
+    DEFAULT_BENCHMARK_DATASET,
+    DEFAULT_BENCHMARK_SYSTEMS,
+    DEFAULT_BENCHMARK_TOKEN_ENCODING,
+    HELP_ADD_FOLDER_NO_INDEX,
+    HELP_ADD_FOLDER_PATH,
+    HELP_BENCHMARK_CONTEXT_TOP_K,
+    HELP_BENCHMARK_DATASET,
+    HELP_BENCHMARK_DATASETS_DIR,
+    HELP_BENCHMARK_MAX_QUERIES,
+    HELP_BENCHMARK_MEASURE_TOKENS,
+    HELP_BENCHMARK_OUTPUT_JSON,
+    HELP_BENCHMARK_REPORT_CSV,
+    HELP_BENCHMARK_REPORT_MD,
+    HELP_BENCHMARK_SYSTEMS,
+    HELP_BENCHMARK_TOKEN_ENCODING,
+    HELP_BENCHMARK_TOP_K,
+    HELP_ENABLE_RELOAD,
+    HELP_INDEX_TARGET,
+    HELP_INSTALL_MODEL,
+    HELP_PORT_BIND,
+    HELP_PORT_LISTENING,
+    HELP_REGISTER_TOOL,
+    HELP_REPORT_MESSAGE,
+    HELP_REPORT_REPO,
+    HELP_REPORT_TITLE,
+    HELP_SERVER_ACTION,
+    HELP_UNINSTALL_DRY_RUN,
+    HELP_UNINSTALL_PURGE_MODEL_CACHE,
+    HELP_UNINSTALL_REMOVE_PACKAGE,
+    HELP_UNINSTALL_YES,
+    HELP_UPDATE_RESTART,
+)
 
 app = typer.Typer(
-    name="contextcore",
-    help="ContextCore â€” unified local search for Claude and other AI tools.",
+    name=APP_NAME,
+    help=APP_HELP,
     add_completion=False,
     rich_markup_mode="rich",
     no_args_is_help=True,
@@ -36,7 +71,7 @@ def init():
 
 @app.command()
 def status(
-    port: int = typer.Option(DEFAULT_PORT, help="Port the server is listening on."),
+    port: int = typer.Option(DEFAULT_PORT, help=HELP_PORT_LISTENING),
 ):
     """
     [bold]Show server health and index progress.[/bold]
@@ -52,7 +87,7 @@ def status(
 def index_cmd(
     target: Optional[str] = typer.Argument(
         None,
-        help="Optional directory to index. Omit to scan all configured directories.",
+        help=HELP_INDEX_TARGET,
     ),
 ):
     """
@@ -81,8 +116,8 @@ def search():
 
 @app.command("add-folder")
 def add_folder_cmd(
-    path: str = typer.Argument(..., help="Directory to add to the watch list."),
-    no_index: bool = typer.Option(False, "--no-index", help="Add the folder without indexing it immediately."),
+    path: str = typer.Argument(..., help=HELP_ADD_FOLDER_PATH),
+    no_index: bool = typer.Option(False, "--no-index", help=HELP_ADD_FOLDER_NO_INDEX),
 ):
     """
     [bold]Add a new folder to ContextCore after setup.[/bold]
@@ -97,7 +132,7 @@ def add_folder_cmd(
 def install(
     model: str = typer.Argument(
         ...,
-        help="Which model to download: [bold]clip[/bold], [bold]audio[/bold], or [bold]all[/bold].",
+        help=HELP_INSTALL_MODEL,
     ),
 ):
     """
@@ -119,7 +154,7 @@ def install(
 def register(
     tool: str = typer.Argument(
         ...,
-        help="Tool to register with. Options: claude-desktop, claude-code, cline, cursor.",
+        help=HELP_REGISTER_TOOL,
     ),
 ):
     """
@@ -139,21 +174,21 @@ def register(
 
 @app.command()
 def benchmark(
-    dataset: str = typer.Option("scifact", "--dataset", help="BEIR dataset name (default: scifact)."),
-    top_k: int = typer.Option(10, "--top-k", min=1, help="Top-k documents to retrieve per query."),
-    max_queries: int = typer.Option(0, "--max-queries", min=0, help="Optional limit for quick iterations (0 = all)."),
-    datasets_dir: str = typer.Option("", "--datasets-dir", help="Directory for BEIR datasets cache."),
-    output_json: str = typer.Option("", "--output-json", help="Optional path to save run + summary JSON."),
-    measure_tokens: bool = typer.Option(False, "--measure-tokens", help="Compute token usage reduction with tiktoken."),
-    token_encoding: str = typer.Option("cl100k_base", "--token-encoding", help="tiktoken encoding name."),
-    context_top_k: int = typer.Option(0, "--context-top-k", min=0, help="Top-k retrieved chunks to count for ContextCore tokens (0 uses --top-k)."),
+    dataset: str = typer.Option(DEFAULT_BENCHMARK_DATASET, "--dataset", help=HELP_BENCHMARK_DATASET),
+    top_k: int = typer.Option(10, "--top-k", min=1, help=HELP_BENCHMARK_TOP_K),
+    max_queries: int = typer.Option(0, "--max-queries", min=0, help=HELP_BENCHMARK_MAX_QUERIES),
+    datasets_dir: str = typer.Option("", "--datasets-dir", help=HELP_BENCHMARK_DATASETS_DIR),
+    output_json: str = typer.Option("", "--output-json", help=HELP_BENCHMARK_OUTPUT_JSON),
+    measure_tokens: bool = typer.Option(False, "--measure-tokens", help=HELP_BENCHMARK_MEASURE_TOKENS),
+    token_encoding: str = typer.Option(DEFAULT_BENCHMARK_TOKEN_ENCODING, "--token-encoding", help=HELP_BENCHMARK_TOKEN_ENCODING),
+    context_top_k: int = typer.Option(0, "--context-top-k", min=0, help=HELP_BENCHMARK_CONTEXT_TOP_K),
     systems: str = typer.Option(
-        "contextcore,bm25",
+        DEFAULT_BENCHMARK_SYSTEMS,
         "--systems",
-        help="Comma-separated retrieval systems to evaluate. Supported: contextcore,bm25",
+        help=HELP_BENCHMARK_SYSTEMS,
     ),
-    report_csv: str = typer.Option("", "--report-csv", help="Optional CSV path for system comparison table."),
-    report_md: str = typer.Option("", "--report-md", help="Optional Markdown path for system comparison table."),
+    report_csv: str = typer.Option("", "--report-csv", help=HELP_BENCHMARK_REPORT_CSV),
+    report_md: str = typer.Option("", "--report-md", help=HELP_BENCHMARK_REPORT_MD),
 ):
     """
     [bold]Benchmark ContextCore retrieval on a BEIR dataset.[/bold]
@@ -164,15 +199,15 @@ def benchmark(
     from cli.commands.benchmark import run_benchmark
 
     run_benchmark(
-        dataset=dataset.strip() or "scifact",
+        dataset=dataset.strip() or DEFAULT_BENCHMARK_DATASET,
         top_k=top_k,
         max_queries=max_queries,
         datasets_dir=datasets_dir.strip() or None,
         output_json=output_json.strip() or None,
         measure_tokens=bool(measure_tokens),
-        token_encoding=token_encoding.strip() or "cl100k_base",
+        token_encoding=token_encoding.strip() or DEFAULT_BENCHMARK_TOKEN_ENCODING,
         context_top_k=(context_top_k if context_top_k > 0 else None),
-        systems=systems.strip() or "contextcore,bm25",
+        systems=systems.strip() or DEFAULT_BENCHMARK_SYSTEMS,
         report_csv=report_csv.strip() or None,
         report_md=report_md.strip() or None,
     )
@@ -182,17 +217,17 @@ def benchmark(
 def report(
     message: list[str] = typer.Argument(
         None,
-        help="Issue description. Example: contextcore report image search returns empty results",
+        help=HELP_REPORT_MESSAGE,
     ),
     repo: str = typer.Option(
         "",
         "--repo",
-        help="Optional GitHub repo override (owner/repo). Default: detected from git origin.",
+        help=HELP_REPORT_REPO,
     ),
     title: str = typer.Option(
         "",
         "--title",
-        help="Optional issue title override.",
+        help=HELP_REPORT_TITLE,
     ),
 ):
     """
@@ -214,7 +249,7 @@ def update(
     restart: bool = typer.Option(
         True,
         "--restart/--no-restart",
-        help="Restart ContextCore background server after pulling updates.",
+        help=HELP_UPDATE_RESTART,
     ),
 ):
     """
@@ -241,8 +276,8 @@ def doctor():
 
 @app.command()
 def serve(
-    port:   int  = typer.Option(DEFAULT_PORT, help="Port to bind the server to."),
-    reload: bool = typer.Option(False,  help="Enable hot-reload for development."),
+    port:   int  = typer.Option(DEFAULT_PORT, help=HELP_PORT_BIND),
+    reload: bool = typer.Option(False,  help=HELP_ENABLE_RELOAD),
 ):
     """
     [bold]Start the ContextCore FastAPI server.[/bold]
@@ -256,8 +291,8 @@ def serve(
 
 @app.command(name="server")
 def server_cmd(
-    action: str = typer.Argument(..., help="Action to run: start, stop, restart, status."),
-    port: int = typer.Option(DEFAULT_PORT, help="Port the server is listening on."),
+    action: str = typer.Argument(..., help=HELP_SERVER_ACTION),
+    port: int = typer.Option(DEFAULT_PORT, help=HELP_PORT_LISTENING),
 ):
     """
     [bold]Manage the ContextCore background server.[/bold]
@@ -276,7 +311,7 @@ def server_cmd(
 
 @app.command(name="start")
 def start_cmd(
-    port: int = typer.Option(DEFAULT_PORT, help="Port the server is listening on."),
+    port: int = typer.Option(DEFAULT_PORT, help=HELP_PORT_LISTENING),
 ):
     """
     [bold]Start the ContextCore background server.[/bold]
@@ -287,7 +322,7 @@ def start_cmd(
 
 @app.command(name="stop")
 def stop_cmd(
-    port: int = typer.Option(DEFAULT_PORT, help="Port the server is listening on."),
+    port: int = typer.Option(DEFAULT_PORT, help=HELP_PORT_LISTENING),
 ):
     """
     [bold]Stop the ContextCore background server.[/bold]
@@ -298,7 +333,7 @@ def stop_cmd(
 
 @app.command(name="restart")
 def restart_cmd(
-    port: int = typer.Option(DEFAULT_PORT, help="Port the server is listening on."),
+    port: int = typer.Option(DEFAULT_PORT, help=HELP_PORT_LISTENING),
 ):
     """
     [bold]Restart the ContextCore background server.[/bold]
@@ -309,17 +344,17 @@ def restart_cmd(
 
 @app.command(name="uninstall")
 def uninstall_cmd(
-    yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be removed."),
+    yes: bool = typer.Option(False, "--yes", help=HELP_UNINSTALL_YES),
+    dry_run: bool = typer.Option(False, "--dry-run", help=HELP_UNINSTALL_DRY_RUN),
     remove_package: bool = typer.Option(
         True,
         "--remove-package/--no-remove-package",
-        help="Also run pip uninstall for contextcore after cleanup.",
+        help=HELP_UNINSTALL_REMOVE_PACKAGE,
     ),
     purge_model_cache: bool = typer.Option(
         True,
         "--purge-model-cache/--keep-model-cache",
-        help="Also remove local Hugging Face/Torch model cache folders.",
+        help=HELP_UNINSTALL_PURGE_MODEL_CACHE,
     ),
 ):
     """
@@ -340,17 +375,17 @@ def uninstall_cmd(
 
 @app.command(name="remove")
 def remove_cmd(
-    yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be removed."),
+    yes: bool = typer.Option(False, "--yes", help=HELP_UNINSTALL_YES),
+    dry_run: bool = typer.Option(False, "--dry-run", help=HELP_UNINSTALL_DRY_RUN),
     remove_package: bool = typer.Option(
         True,
         "--remove-package/--no-remove-package",
-        help="Also run pip uninstall for contextcore after cleanup.",
+        help=HELP_UNINSTALL_REMOVE_PACKAGE,
     ),
     purge_model_cache: bool = typer.Option(
         True,
         "--purge-model-cache/--keep-model-cache",
-        help="Also remove local Hugging Face/Torch model cache folders.",
+        help=HELP_UNINSTALL_PURGE_MODEL_CACHE,
     ),
 ):
     """

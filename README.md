@@ -134,7 +134,7 @@ contextcore benchmark --dataset scifact --top-k 10 --measure-tokens --context-to
 Compare retrieval systems (ContextCore vs BM25) and export publish-ready tables:
 
 ```powershell
-contextcore benchmark --dataset scifact --top-k 10 --measure-tokens --context-top-k 5 --systems contextcore,bm25 --report-csv .\benchmarks\scifact_compare.csv --report-md .\benchmarks\scifact_compare.md --output-json .\benchmarks\scifact_compare.json
+contextcore benchmark --dataset scifact --top-k 10 --measure-tokens --context-top-k 5 --systems contextcore_hybrid,bm25_only,trigram_only --report-csv .\benchmarks\scifact_compare.csv --report-md .\benchmarks\scifact_compare.md --output-json .\benchmarks\scifact_compare.json
 ```
 
 ## Daily Commands
