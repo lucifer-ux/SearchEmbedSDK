@@ -26,12 +26,21 @@ def health():
 @app.get("/search")
 def search(
     query: str = Query(..., min_length=1),
-    top_k: int = Query(20, ge=1, le=100)
+    top_k: int = Query(20, ge=1, le=100),
+    retrieval_mode: str = Query("contextcore_hybrid"),
+    max_context_tokens_per_result: int | None = Query(None, ge=1, le=4000),
+    max_chunks_per_doc: int = Query(1, ge=1, le=4),
 ):
     if not search_engine:
         raise HTTPException(status_code=503, detail="Search engine not ready")
 
-    results = search_engine.search(query=query, top_k=top_k)
+    results = search_engine.search(
+        query=query,
+        top_k=top_k,
+        retrieval_mode=retrieval_mode,
+        max_context_tokens_per_result=max_context_tokens_per_result,
+        max_chunks_per_doc=max_chunks_per_doc,
+    )
 
     return {
         "query": query,

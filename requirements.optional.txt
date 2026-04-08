@@ -21,3 +21,6 @@ qdrant-client
 
 # OCR (optional text extraction from images)
 pytesseract
+# Benchmarking datasets / utilities (optional)
+beir
+tiktoken

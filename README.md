@@ -95,6 +95,47 @@ contextcore --help
 
 If that fails, the package is not installed in the Python environment your shell is using.
 
+## BEIR Benchmark (SciFact)
+
+You can benchmark the current text retrieval stack on a BEIR dataset (starting with SciFact) without touching your existing index data.
+
+Install optional benchmark dependency:
+
+```powershell
+python -m pip install beir
+```
+
+Run benchmark:
+
+```powershell
+contextcore benchmark --dataset scifact --top-k 10
+```
+
+Optional fast iteration with fewer queries:
+
+```powershell
+contextcore benchmark --dataset scifact --top-k 10 --max-queries 50
+```
+
+Optional JSON output:
+
+```powershell
+contextcore benchmark --dataset scifact --output-json .\benchmarks\scifact_run.json
+```
+
+Token reduction benchmark (tiktoken):
+
+```powershell
+python -m pip install tiktoken
+contextcore benchmark --dataset scifact --top-k 10 --measure-tokens --context-top-k 5
+```
+
+Compare retrieval systems (ContextCore vs BM25) and export publish-ready tables:
+
+```powershell
+contextcore benchmark --dataset scifact --top-k 10 --measure-tokens --context-top-k 5 --systems contextcore_hybrid,bm25_only,trigram_only --report-csv .\benchmarks\scifact_compare.csv --report-md .\benchmarks\scifact_compare.md --output-json .\benchmarks\scifact_compare.json
+```
+
 ## Daily Commands
 
 ### Show status
