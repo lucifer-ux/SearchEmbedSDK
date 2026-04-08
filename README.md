@@ -3,12 +3,11 @@
 Search all your local data — notes, code, recordings, images — 
 and send only what matters to AI.
 
-> Cut Claude API costs by 50–99% without losing context quality.
+> Reduce LLM context tokens by ~57% on SciFact benchmark settings.
 
-| Source       | Without ContextCore | With ContextCore | Reduction |
-|-------------|-------------------|-----------------|-----------|
-| Text notes  | 889,710 tokens    | 444,855 tokens  | 50%       |
-| Codebase    | 97,868 tokens     | 1,085 tokens    | **98.9%** |
+| Benchmark Setup | Baseline Context | ContextCore Context | Reduction |
+|---------------|------------------|---------------------|-----------|
+| SciFact (top-5 retrieved docs vs chunked context) | 1,723.5 tokens/query | 733.4 tokens/query | **57.45%** |
 
 ![ContextCore Screenshot](images/image.png)
 

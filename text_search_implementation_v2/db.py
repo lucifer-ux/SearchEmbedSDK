@@ -48,7 +48,35 @@ def init_db():
             );
             """
         )
+        # Trigram lane for typo/noisy query recovery (may be unavailable on older SQLite builds).
+        try:
+            conn.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS files_fts_trigram USING fts5(
+                    filename, content, content='files', content_rowid='id', tokenize='trigram'
+                );
+                """
+            )
+        except sqlite3.OperationalError:
+            # Keep backward compatibility when trigram tokenizer is not supported.
+            pass
     conn.close()
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        (name,),
+    ).fetchone()
+    return bool(row)
+
+
+def trigram_supported() -> bool:
+    conn = get_conn()
+    try:
+        return _table_exists(conn, "files_fts_trigram")
+    finally:
+        conn.close()
 
 # helper to upsert file metadata and fts content
 def upsert_file(path: str, filename: str, category: str, mtime: float, content: str):
@@ -68,6 +96,8 @@ def upsert_file(path: str, filename: str, category: str, mtime: float, content: 
                 (filename, category, mtime, content, file_id),
             )
             conn.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
+            if _table_exists(conn, "files_fts_trigram"):
+                conn.execute("DELETE FROM files_fts_trigram WHERE rowid = ?", (file_id,))
         else:
             file_id = None
             cur = conn.execute(
@@ -90,12 +120,19 @@ def upsert_file(path: str, filename: str, category: str, mtime: float, content: 
                     (filename, category, mtime, content, file_id),
                 )
                 conn.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
+                if _table_exists(conn, "files_fts_trigram"):
+                    conn.execute("DELETE FROM files_fts_trigram WHERE rowid = ?", (file_id,))
 
         # insert into fts
         conn.execute(
             "INSERT INTO files_fts(rowid, filename, content) VALUES (?, ?, ?)",
             (file_id, filename, content)
         )
+        if _table_exists(conn, "files_fts_trigram"):
+            conn.execute(
+                "INSERT INTO files_fts_trigram(rowid, filename, content) VALUES (?, ?, ?)",
+                (file_id, filename, content),
+            )
     conn.close()
     return True
 
@@ -108,6 +145,29 @@ def query_fts(match_query: str, limit: int = 50):
     rows = cur.fetchall()
     conn.close()
     return rows
+
+
+def query_fts_trigram(match_query: str, limit: int = 50):
+    conn = get_conn()
+    try:
+        if not _table_exists(conn, "files_fts_trigram"):
+            return []
+        cur = conn.execute(
+            """
+            SELECT rowid as id, bm25(files_fts_trigram) as score
+            FROM files_fts_trigram
+            WHERE files_fts_trigram MATCH ?
+            ORDER BY score
+            LIMIT ?
+            """,
+            (match_query, limit),
+        )
+        return cur.fetchall()
+    except sqlite3.OperationalError:
+        # Tokenizer unsupported or malformed query for trigram syntax.
+        return []
+    finally:
+        conn.close()
 
 def get_file_metadata_by_ids(ids):
     if not ids:
@@ -148,6 +208,8 @@ def delete_file_by_path_category(path: str, category: str) -> bool:
         if not row:
             return False
         conn.execute("DELETE FROM files_fts WHERE rowid = ?", (row["id"],))
+        if _table_exists(conn, "files_fts_trigram"):
+            conn.execute("DELETE FROM files_fts_trigram WHERE rowid = ?", (row["id"],))
         conn.execute("DELETE FROM files WHERE id = ?", (row["id"],))
     conn.close()
     return True
