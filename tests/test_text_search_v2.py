@@ -16,7 +16,7 @@ def _reload_text_modules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     db_mod.init_db()
     return db_mod, search_mod
 
-
+ 
 def _seed_docs(db_mod: Any):
     docs = [
         (
