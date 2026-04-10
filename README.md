@@ -10,7 +10,7 @@ and send only what matters to AI.
 | SciFact (top-5 retrieved docs vs chunked context) | 1,723.5 tokens/query | 733.4 tokens/query | **57.45%** |
 
 ![ContextCore Screenshot](images/image.png)
-
+![Contextcore search screenshot](images/search.png)
 ## Install
 
 Install from PyPI:
