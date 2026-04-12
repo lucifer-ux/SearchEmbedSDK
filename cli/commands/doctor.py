@@ -13,7 +13,12 @@ import sys
 from pathlib import Path
 
 from cli.constants import DEFAULT_PORT
-from cli.lifecycle import autostart_status, get_port_usage, index_lock_active, read_index_state
+from cli.lifecycle import (
+    autostart_status,
+    get_port_usage,
+    index_lock_active,
+    read_index_state,
+)
 from cli.paths import get_sdk_root
 from cli.ui import console, error, header, hint, section, success, warning
 
@@ -57,7 +62,12 @@ def run_doctor() -> None:
         import sqlite_vec  # noqa: F401
         _check("sqlite-vec installed", True)
     except ImportError:
-        _check("sqlite-vec not installed", False, "install sqlite-vec", ".venv/Scripts/pip install sqlite-vec")
+        _check(
+            "sqlite-vec not installed",
+            False,
+            "install sqlite-vec",
+            ".venv/Scripts/pip install sqlite-vec",
+        )
         issues += 1
 
     section("Configuration")
@@ -113,8 +123,13 @@ def run_doctor() -> None:
 
     section("MCP Server")
     mcp = sdk_root / "mcp_server.py"
-    if _check("mcp_server.py found", mcp.exists(), "reinstall contextcore", "pip install --force-reinstall contextcore"):
-        r = subprocess.run(
+    if _check(
+        "mcp_server.py found",
+        mcp.exists(),
+        "reinstall contextcore",
+        "pip install --force-reinstall contextcore",
+    ):
+        import_result = subprocess.run(
             [sys.executable, "-c", "import mcp_server"],
             capture_output=True,
             cwd=str(sdk_root),
@@ -122,12 +137,12 @@ def run_doctor() -> None:
         )
         _check(
             "mcp_server imports cleanly",
-            r.returncode == 0,
+            import_result.returncode == 0,
             "retry MCP import check",
             f"cd \"{sdk_root}\" && \"{sys.executable}\" -c \"import mcp_server\"",
         )
-        if r.returncode != 0:
-            console.print(f"  [dim]{r.stderr.strip()[-400:]}[/dim]")
+        if import_result.returncode != 0:
+            console.print(f"  [dim]{import_result.stderr.strip()[-400:]}[/dim]")
             issues += 1
     else:
         issues += 1
@@ -139,11 +154,21 @@ def run_doctor() -> None:
     elif usage.get("in_use"):
         pid = usage.get("pid")
         name = usage.get("process_name") or "unknown"
+        conflict_label = (
+            f"Port {DEFAULT_PORT} is occupied by {name}"
+            f"{f' (PID {pid})' if pid else ''}"
+        )
         _check(
-            f"Port {DEFAULT_PORT} is occupied by {name}{f' (PID {pid})' if pid else ''}",
+            conflict_label,
             False,
             "inspect the conflicting process",
-            f"tasklist /FI \"PID eq {pid}\"" if platform.system() == "Windows" and pid else f"ps -p {pid} -o pid,comm,args" if pid else "",
+            (
+                f"tasklist /FI \"PID eq {pid}\""
+                if platform.system() == "Windows" and pid
+                else f"ps -p {pid} -o pid,comm,args"
+                if pid
+                else ""
+            ),
         )
         if platform.system() == "Windows" and pid:
             hint("stop it if appropriate", f"taskkill /F /PID {pid}")
@@ -163,9 +188,19 @@ def run_doctor() -> None:
     plat = platform.system().lower()
     if plat == "windows":
         import os
-        claude_cfg = Path(os.environ.get("APPDATA", "~")) / "Claude" / "claude_desktop_config.json"
+        claude_cfg = (
+            Path(os.environ.get("APPDATA", "~"))
+            / "Claude"
+            / "claude_desktop_config.json"
+        )
     elif plat == "darwin":
-        claude_cfg = Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+        claude_cfg = (
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "Claude"
+            / "claude_desktop_config.json"
+        )
     else:
         claude_cfg = Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
 
@@ -179,7 +214,12 @@ def run_doctor() -> None:
         try:
             data = json.loads(claude_cfg.read_text(encoding="utf-8"))
             has_cc = "contextcore" in data.get("mcpServers", {})
-            _check("ContextCore registered in Claude Desktop", has_cc, "re-register", "contextcore register claude-desktop")
+            _check(
+                "ContextCore registered in Claude Desktop",
+                has_cc,
+                "re-register",
+                "contextcore register claude-desktop",
+            )
             if not has_cc:
                 issues += 1
         except Exception as e:
@@ -227,12 +267,20 @@ def run_doctor() -> None:
         import annoy  # noqa: F401
         success("annoy installed (semantic image ANN backend available)")
     except ImportError:
-        warning("annoy not installed - semantic image search disabled (OCR/filename still works)")
+        warning(
+            "annoy not installed - semantic image search disabled "
+            "(OCR/filename still works)"
+        )
         hint("install annoy", f"{sys.executable} -m pip install annoy")
 
     console.print()
     if issues == 0:
-        console.print("[bold green]All checks passed[/bold green]  ContextCore is healthy.")
+        console.print(
+            "[bold green]All checks passed[/bold green]  ContextCore is healthy."
+        )
     else:
-        console.print(f"[bold red]{issues} issue{'s' if issues > 1 else ''} found.[/bold red]  Follow the Fix: suggestions above.")
+        console.print(
+            f"[bold red]{issues} issue{'s' if issues > 1 else ''} found.[/bold red]  "
+            "Follow the Fix: suggestions above."
+        )
     console.print()

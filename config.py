@@ -110,12 +110,15 @@ def _fallback_yaml_parse(path: Path) -> Dict[str, Any]:
 
 
 def _nested_get(cfg: Dict[str, Any], dotted_key: str, default: Any = None) -> Any:
-    """Retrieve a nested value using dot notation, e.g. 'media.video.watch_directories'."""
+    """Retrieve a nested value using dot notation.
+
+    Example: ``media.video.watch_directories``.
+    """
     keys = dotted_key.split(".")
     current: Any = cfg
-    for k in keys:
+    for key in keys:
         if isinstance(current, dict):
-            current = current.get(k)
+            current = current.get(key)
         else:
             return default
         if current is None:
@@ -473,8 +476,8 @@ def update_config_values(updates: Dict[str, Any]) -> Optional[Path]:
             elif isinstance(value, list):
                 lines.append(f"{key}:")
                 if value:
-                    for item in value:
-                        text = str(item).replace("'", "''")
+                    for list_item in value:
+                        text = str(list_item).replace("'", "''")
                         lines.append(f"  - '{text}'")
                 else:
                     lines.append("  []")

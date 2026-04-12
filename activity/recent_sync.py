@@ -37,7 +37,7 @@ def record_sync(path: str, category: str):
         filename = Path(path).name
 
         # Remove duplicates (same path)
-        items = [i for i in items if i["path"] != path]
+        items = [item for item in items if item["path"] != path]
 
         items.insert(0, {
             "path": path,

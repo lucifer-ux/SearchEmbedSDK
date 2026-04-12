@@ -1,5 +1,4 @@
 #!/usr/bin/env sh
-set -e
 
 if [ -x "./.venv/bin/python" ]; then
   PYTHON_CMD="./.venv/bin/python"
@@ -22,4 +21,28 @@ if ! "$PYTHON_CMD" -c "import pytest" >/dev/null 2>&1; then
   exit 1
 fi
 
-"$PYTHON_CMD" -m pytest tests/ -v --timeout=60 --tb=short
+if ! "$PYTHON_CMD" -c "import pycodestyle" >/dev/null 2>&1; then
+  echo "pycodestyle is not installed for $PYTHON_CMD"
+  echo "Install it with: $PYTHON_CMD -m pip install pycodestyle"
+  exit 1
+fi
+
+STAGED_PY_DIFF=$(git diff --cached --diff-filter=ACMR -- '*.py')
+HOOK_FAILED=0
+
+if [ -n "$STAGED_PY_DIFF" ]; then
+  echo "Running PEP 8 lint (pycodestyle) on staged Python changes..."
+  if ! printf "%s\n" "$STAGED_PY_DIFF" | "$PYTHON_CMD" -m pycodestyle --diff --max-line-length=88 --ignore=E203,W503; then
+    HOOK_FAILED=1
+  fi
+fi
+
+echo "Running pytest suite..."
+if ! "$PYTHON_CMD" -m pytest tests/ -v --timeout=60 --tb=short; then
+  HOOK_FAILED=1
+fi
+
+if [ "$HOOK_FAILED" -ne 0 ]; then
+  echo "husky - pre-commit checks failed"
+  exit 1
+fi
