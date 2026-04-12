@@ -39,6 +39,7 @@ from cli.ui import (
     done_panel,
     set_theme,
     get_theme_name,
+    set_setup_theme,
 )
 
 _SDK_ROOT = get_sdk_root()
@@ -112,7 +113,7 @@ def _apply_setup_theme(theme_name: str) -> None:
         _STYLE = _STYLE_DARK
         _SETUP_THEME = "dark"
 
-    set_theme(_SETUP_THEME)
+    set_setup_theme(_SETUP_THEME)
 
 
 def _select_with_ui(

@@ -92,6 +92,35 @@ def get_theme_name() -> str:
     return _ACTIVE_THEME_NAME
 
 
+def _get_setup_theme_from_config() -> str:
+    """Get the setup theme from config, falling back to active theme."""
+    try:
+        from config import get_config
+        raw = get_config().get("ui_theme")
+        return _resolve_theme_name(raw)
+    except Exception:
+        return _ACTIVE_THEME_NAME
+
+
+def get_setup_theme() -> str:
+    """Returns the theme selected during init (from config or runtime)."""
+    return _get_setup_theme_from_config()
+
+
+def set_setup_theme(theme_name: str) -> str:
+    """Sets both setup theme (config) and runtime theme (console)."""
+    resolved = _resolve_theme_name(theme_name)
+    set_theme(resolved)
+    try:
+        from config import get_config, update_config_values
+        existing = get_config()
+        if existing.get("ui_theme") != resolved:
+            update_config_values({"ui_theme": resolved})
+    except Exception:
+        pass
+    return resolved
+
+
 def set_theme(theme_name: str) -> str:
     global _ACTIVE_THEME_NAME, _HAS_PUSHED_THEME
 
