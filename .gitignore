@@ -89,8 +89,6 @@ temp/
 # Media files (do NOT commit user data)
 # -------------------------------
 # Except README images folder
-!images/
-images/
 *.mp4
 *.mkv
 *.avi
@@ -104,6 +102,10 @@ images/
 *.webp
 *.gif
 *.pdf
+
+# Keep documentation assets in repo images folder trackable
+!images/
+!images/**
 
 # -------------------------------
 # Secrets & Config
