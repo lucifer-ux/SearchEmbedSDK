@@ -27,14 +27,14 @@ def _search_api(query: str, top_k: int = 20) -> dict:
     print(f"[_search_api] Starting search for: {query}")
     print(f"[_search_api] API_BASE: {API_BASE}")
     try:
-        r = requests.get(
+        response = requests.get(
             f"{API_BASE}/search",
             params={"query": query, "top_k": top_k, "modality": "all"},
             timeout=30,
         )
-        print(f"[_search_api] Response status: {r.status_code}")
-        if r.status_code == 200:
-            data = r.json()
+        print(f"[_search_api] Response status: {response.status_code}")
+        if response.status_code == 200:
+            data = response.json()
             print(f"[_search_api] Response keys: {data.keys()}")
             results_by_modality = {}
             for modality in ["text", "image", "video", "audio"]:
@@ -45,7 +45,7 @@ def _search_api(query: str, top_k: int = 20) -> dict:
                 results_by_modality[modality] = results[:top_k]
             return results_by_modality
         else:
-            print(f"[_search_api] Error: {r.text}")
+            print(f"[_search_api] Error: {response.text}")
     except Exception as e:
         print(f"[_search_api] Exception: {e}")
     return {}
@@ -238,19 +238,19 @@ OptionList:focus > .option-list--option-highlighted {
         self.current_results = results  # Store for selection
         if results:
             self.log(f">>> Displaying {len(results)} {self.current_modality} results")
-            scores = [abs(float(r.get("score", 0.0))) for r in results]
+            scores = [abs(float(result.get("score", 0.0))) for result in results]
             max_score = max(scores) if scores else 0.0
-            for i, r in enumerate(results):
-                path = r.get("path") or r.get("video_path") or ""
-                filename = r.get("filename") or (Path(path).name if path else "Unknown")
-                raw_score = abs(float(r.get("score", 0.0)))
-                cloud_tag = " [cloud]" if r.get("cloud_url") else ""
+            for result_index, result in enumerate(results):
+                path = result.get("path") or result.get("video_path") or ""
+                filename = result.get("filename") or (Path(path).name if path else "Unknown")
+                raw_score = abs(float(result.get("score", 0.0)))
+                cloud_tag = " [cloud]" if result.get("cloud_url") else ""
 
                 normalized = raw_score / max_score if max_score > 0 else 0.0
                 if max_score == 0.0:
-                    if i == 0:
+                    if result_index == 0:
                         relevance_tag = " [green]strong[/green]"
-                    elif i < 3:
+                    elif result_index < 3:
                         relevance_tag = " [yellow]medium[/yellow]"
                     else:
                         relevance_tag = ""
@@ -266,7 +266,7 @@ OptionList:focus > .option-list--option-highlighted {
                 else:
                     score_display = f"{raw_score:.2f}" if raw_score >= 0.01 else f"{raw_score:.2e}"
                 display_text = f"[bold]{filename}[/bold]{cloud_tag}{relevance_tag} [dim]{score_display}[/dim]"
-                results_list.add_option(Option(prompt=display_text, id=str(i)))
+                results_list.add_option(Option(prompt=display_text, id=str(result_index)))
             results_list.highlighted = 0  # Highlight first
         else:
             results_list.add_option(Option(prompt=f"[dim]No {self.current_modality} results[/dim]", id=""))

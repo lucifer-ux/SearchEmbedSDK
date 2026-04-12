@@ -390,8 +390,8 @@ class ResourceManager:
             deadline = time.time() + window
             while time.time() < deadline:
                 try:
-                    r = requests.get(f"{LLAMA_SERVER_URL}/health", timeout=1)
-                    if r.status_code == 200:
+                    response = requests.get(f"{LLAMA_SERVER_URL}/health", timeout=1)
+                    if response.status_code == 200:
                         self._llm_ready = True
                         print("✅ llama-server ready")
                         return
@@ -1477,11 +1477,11 @@ def _categorize_top_level_dirs(repo_root: Path) -> dict[str, Any]:
             categorized["configuration"].append(name)
         else:
             categorized["application_code"].append(name)
-    for k in categorized:
-        categorized[k] = sorted(categorized[k])
+    for category in categorized:
+        categorized[category] = sorted(categorized[category])
     return {
         "directories_by_category": categorized,
-        "counts": {k: len(v) for k, v in categorized.items()},
+        "counts": {category: len(v) for category, v in categorized.items()},
     }
 
 
@@ -2269,11 +2269,11 @@ def _extract_js_like_symbols_and_imports(content: str) -> dict[str, Any]:
     symbols: list[dict[str, Any]] = []
 
     import_matches = re.findall(r"(?:import\s+.*?\s+from\s+|require\(|import\()\s*['\"]([^'\"]+)['\"]", content)
-    for item in import_matches:
-        if item.startswith(("./", "../", "/")):
-            internal.add(item)
+    for import_path in import_matches:
+        if import_path.startswith(("./", "../", "/")):
+            internal.add(import_path)
         else:
-            external.add(item.split("/")[0])
+            external.add(import_path.split("/")[0])
 
     for m in re.finditer(r"^\s*export\s+class\s+([A-Za-z_]\w*)", content, flags=re.M):
         symbols.append(
@@ -4398,8 +4398,8 @@ def search_code_chunks_api(
                 ids = list(hit_by_id.keys())
                 rows: list[sqlite3.Row] = []
                 conn = _code_db_conn()
-                for i in range(0, len(ids), 900):
-                    part = ids[i : i + 900]
+                for batch_start in range(0, len(ids), 900):
+                    part = ids[batch_start : batch_start + 900]
                     if not part:
                         continue
                     placeholders = ",".join("?" for _ in part)
