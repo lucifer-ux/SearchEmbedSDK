@@ -30,3 +30,4 @@ Pillow
 typer
 rich
 questionary
+textual

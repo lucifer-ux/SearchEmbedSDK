@@ -390,8 +390,8 @@ class ResourceManager:
             deadline = time.time() + window
             while time.time() < deadline:
                 try:
-                    r = requests.get(f"{LLAMA_SERVER_URL}/health", timeout=1)
-                    if r.status_code == 200:
+                    response = requests.get(f"{LLAMA_SERVER_URL}/health", timeout=1)
+                    if response.status_code == 200:
                         self._llm_ready = True
                         print("✅ llama-server ready")
                         return
@@ -839,6 +839,248 @@ def _enqueue_watch_job(modality: str, target_dir: Path) -> None:
     _watch_queue.put({"modality": modality, "target_dir": str(target_dir)})
 
 
+def _delete_text_file(path: str) -> bool:
+    """Delete text file entry and its full-text search index."""
+    try:
+        from text_search_implementation_v2.db import delete_file_by_path_category, get_conn, _table_exists
+        # Try common categories
+        for category in [None, "text", "code_comment", "transcript"]:
+            try:
+                if category is None:
+                    # Try by path without category filter
+                    conn = get_conn()
+                    row = conn.execute("SELECT id FROM files WHERE path = ?", (path,)).fetchone()
+                    if row:
+                        file_id = row["id"]
+                        conn.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
+                        try:
+                            if _table_exists(conn, "files_fts_trigram"):
+                                conn.execute("DELETE FROM files_fts_trigram WHERE rowid = ?", (file_id,))
+                        except Exception:
+                            pass
+                        conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
+                        conn.commit()
+                        conn.close()
+                        return True
+                    conn.close()
+                else:
+                    if delete_file_by_path_category(path, category):
+                        return True
+            except Exception:
+                pass
+        return True
+    except Exception as e:
+        print(f"⚠️ Error deleting text file {path}: {e}")
+        return False
+
+
+def _delete_image_file(path: str) -> bool:
+    """Delete image entry, OCR text, and embedding from Annoy index."""
+    try:
+        global _annoy_needs_rebuild
+        from image_search_implementation_v2.db import get_conn as img_get_conn
+        conn = img_get_conn()
+        row = conn.execute("SELECT id, annoy_id FROM images WHERE path = ?", (path,)).fetchone()
+        if row:
+            image_id = int(row["id"])
+            annoy_id = row["annoy_id"]
+            
+            # Delete FTS entries
+            conn.execute("DELETE FROM images_fts WHERE rowid = ?", (image_id,))
+            # Delete embeddings
+            if annoy_id:
+                emb_path = IMAGE_EMBED_DIR / f"{annoy_id}.npy"
+                if emb_path.exists():
+                    try:
+                        emb_path.unlink()
+                    except Exception:
+                        pass
+                _annoy_needs_rebuild = True
+            # Delete image record
+            conn.execute("DELETE FROM images WHERE id = ?", (image_id,))
+            conn.commit()
+            conn.close()
+            print(f"🗑️ Deleted image: {path}")
+            return True
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"⚠️ Error deleting image file {path}: {e}")
+        return False
+
+
+def _delete_video_file(path: str) -> bool:
+    """Delete video, frames, and frame vectors from database."""
+    try:
+        from video_search_implementation_v2.video_index import _get_conn
+        conn = _get_conn()
+        row = conn.execute("SELECT id FROM videos WHERE path = ?", (path,)).fetchone()
+        if row:
+            video_id = int(row["id"])
+            # Get all frames and delete their vectors
+            frames = conn.execute(
+                "SELECT id FROM frames WHERE video_id = ?", (video_id,)
+            ).fetchall()
+            for frame in frames:
+                try:
+                    conn.execute("DELETE FROM frame_vectors WHERE rowid = ?", (frame["id"],))
+                except Exception:
+                    pass
+                try:
+                    conn.execute("DELETE FROM frames_fts WHERE rowid = ?", (frame["id"],))
+                except Exception:
+                    pass
+            # Delete frames and video
+            conn.execute("DELETE FROM frames WHERE video_id = ?", (video_id,))
+            conn.execute("DELETE FROM videos WHERE id = ?", (video_id,))
+            conn.commit()
+            conn.close()
+            print(f"🗑️ Deleted video and {len(frames)} frames: {path}")
+            return True
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"⚠️ Error deleting video file {path}: {e}")
+        return False
+
+
+def _delete_audio_file(path: str) -> bool:
+    """Delete audio transcript entries from text database."""
+    try:
+        from text_search_implementation_v2.db import delete_file_by_path_category
+        # Audio transcripts are stored as text with category 'audio_transcript'
+        result = delete_file_by_path_category(path, "audio_transcript")
+        if result:
+            print(f"🗑️ Deleted audio transcript: {path}")
+        return True
+    except Exception as e:
+        print(f"⚠️ Error deleting audio file {path}: {e}")
+        return False
+
+
+def _delete_code_file(path: str) -> bool:
+    """Delete code file and associated symbols/chunks."""
+    try:
+        conn = _code_db_conn()
+        # Delete code chunks for this file
+        conn.execute("DELETE FROM code_chunk_vectors WHERE chunk_id IN (SELECT id FROM code_chunks WHERE file_path = ?)", (path,))
+        conn.execute("DELETE FROM code_chunks WHERE file_path = ?", (path,))
+        # Delete symbols
+        conn.execute("DELETE FROM code_symbols WHERE file_path = ?", (path,))
+        # Delete project file entry
+        conn.execute("DELETE FROM project_files WHERE file_path = ?", (path,))
+        conn.commit()
+        conn.close()
+        global _code_chunk_annoy_needs_rebuild
+        _mark_code_chunk_annoy_dirty()
+        print(f"🗑️ Deleted code file and chunks: {path}")
+        return True
+    except Exception as e:
+        print(f"⚠️ Error deleting code file {path}: {e}")
+        return False
+
+
+def cleanup_stale_entries() -> dict[str, int]:
+    """Remove database entries for files that no longer exist on disk."""
+    results = {"text_removed": 0, "image_removed": 0, "video_removed": 0, "audio_removed": 0, "code_removed": 0}
+    
+    # Clean up text files
+    try:
+        from text_search_implementation_v2.db import get_conn as text_get_conn
+        conn = text_get_conn()
+        rows = conn.execute("SELECT path FROM files").fetchall()
+        for row in rows:
+            path = row["path"]
+            if not Path(path).exists():
+                _delete_text_file(path)
+                results["text_removed"] += 1
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ Error cleaning up text entries: {e}")
+    
+    # Clean up image files
+    try:
+        from image_search_implementation_v2.db import get_conn as img_get_conn
+        conn = img_get_conn()
+        rows = conn.execute("SELECT path FROM images").fetchall()
+        for row in rows:
+            path = row["path"]
+            if not Path(path).exists():
+                _delete_image_file(path)
+                results["image_removed"] += 1
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ Error cleaning up image entries: {e}")
+    
+    # Clean up video files
+    try:
+        from video_search_implementation_v2.video_index import _get_conn as video_get_conn
+        conn = video_get_conn()
+        rows = conn.execute("SELECT path FROM videos").fetchall()
+        for row in rows:
+            path = row["path"]
+            if not Path(path).exists():
+                _delete_video_file(path)
+                results["video_removed"] += 1
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ Error cleaning up video entries: {e}")
+    
+    # Clean up code files
+    try:
+        conn = _code_db_conn()
+        rows = conn.execute("SELECT file_path FROM project_files").fetchall()
+        for row in rows:
+            path = row["file_path"]
+            if not Path(path).exists():
+                _delete_code_file(path)
+                results["code_removed"] += 1
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ Error cleaning up code entries: {e}")
+    
+    total_removed = sum(results.values())
+    print(f"🧹 Cleanup completed: removed {total_removed} stale entries")
+    for modality, count in results.items():
+        if count > 0:
+            print(f"  {modality}: {count}")
+    
+    return results
+
+
+def _route_watch_delete_event(src_path: str) -> None:
+    """Route file deletion to appropriate modality handler."""
+    path = Path(src_path)
+    suffix = path.suffix.lower()
+    enabled = _watcher_enabled_modalities()
+    
+    print(f"🗑️  Routing deletion for {src_path}, suffix: {suffix}")
+    print(f"🗑️  Enabled modalities: {enabled}")
+    
+    # Text files
+    if enabled["text"] and suffix in TEXT_WATCH_EXTS:
+        print(f"🗑️  Deleting as text file: {src_path}")
+        _delete_text_file(src_path)
+    # Image files
+    if enabled["image"] and suffix in IMAGE_WATCH_EXTS:
+        print(f"🗑️  Deleting as image file: {src_path}")
+        _delete_image_file(src_path)
+    # Audio files
+    if enabled["audio"] and suffix in AUDIO_WATCH_EXTS:
+        print(f"🗑️  Deleting as audio file: {src_path}")
+        _delete_audio_file(src_path)
+    # Video files
+    if enabled["video"] and suffix in VIDEO_WATCH_EXTS:
+        print(f"🗑️  Deleting as video file: {src_path}")
+        _delete_video_file(src_path)
+    # Code files
+    if enabled["code"] and (path.name in CODE_SPECIAL_FILENAMES or suffix in CODE_WATCH_EXTS):
+        print(f"🗑️  Deleting as code file: {src_path}")
+        _delete_code_file(src_path)
+    
+    print(f"🗑️  Deletion routing complete for {src_path}")
+
+
 def _route_watch_event(src_path: str) -> None:
     path = Path(src_path)
     if not path.exists() or not path.is_file():
@@ -931,6 +1173,14 @@ def start_content_watcher():
                 print(f"👁️  {msg}")
                 _watcher_log(msg)
                 _route_watch_event(event.dest_path)
+
+        def on_deleted(self, event):
+            if not event.is_directory:
+                msg = f"Watcher: file deleted: {event.src_path}"
+                print(f"🗑️  DELETION EVENT: {msg}")
+                _watcher_log(msg)
+                print(f"🗑️  Calling _route_watch_delete_event for {event.src_path}")
+                _route_watch_delete_event(event.src_path)
 
     _watcher_log("Starting worker thread and observer")
     _watch_stop_event.clear()
@@ -1227,11 +1477,11 @@ def _categorize_top_level_dirs(repo_root: Path) -> dict[str, Any]:
             categorized["configuration"].append(name)
         else:
             categorized["application_code"].append(name)
-    for k in categorized:
-        categorized[k] = sorted(categorized[k])
+    for category in categorized:
+        categorized[category] = sorted(categorized[category])
     return {
         "directories_by_category": categorized,
-        "counts": {k: len(v) for k, v in categorized.items()},
+        "counts": {category: len(v) for category, v in categorized.items()},
     }
 
 
@@ -2019,11 +2269,11 @@ def _extract_js_like_symbols_and_imports(content: str) -> dict[str, Any]:
     symbols: list[dict[str, Any]] = []
 
     import_matches = re.findall(r"(?:import\s+.*?\s+from\s+|require\(|import\()\s*['\"]([^'\"]+)['\"]", content)
-    for item in import_matches:
-        if item.startswith(("./", "../", "/")):
-            internal.add(item)
+    for import_path in import_matches:
+        if import_path.startswith(("./", "../", "/")):
+            internal.add(import_path)
         else:
-            external.add(item.split("/")[0])
+            external.add(import_path.split("/")[0])
 
     for m in re.finditer(r"^\s*export\s+class\s+([A-Za-z_]\w*)", content, flags=re.M):
         symbols.append(
@@ -4148,8 +4398,8 @@ def search_code_chunks_api(
                 ids = list(hit_by_id.keys())
                 rows: list[sqlite3.Row] = []
                 conn = _code_db_conn()
-                for i in range(0, len(ids), 900):
-                    part = ids[i : i + 900]
+                for batch_start in range(0, len(ids), 900):
+                    part = ids[batch_start : batch_start + 900]
                     if not part:
                         continue
                     placeholders = ",".join("?" for _ in part)
