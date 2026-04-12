@@ -4,12 +4,20 @@ Diagnostic script to test video indexing and frame extraction
 """
 
 import sys
+import os
 import subprocess
 from pathlib import Path
 
 # Add to path
 _ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(_ROOT))
+
+# Test video configuration - can be overridden with environment variable
+DEFAULT_TEST_VIDEO = r"C:\Users\USER\Documents\test\Screen Recording 2026-03-28 220347.mp4"
+TEST_VIDEO_PATH = os.environ.get("CONTEXTCORE_TEST_VIDEO", DEFAULT_TEST_VIDEO)
+
+# Usage: Set CONTEXTCORE_TEST_VIDEO environment variable to use a different test video
+# Example: export CONTEXTCORE_TEST_VIDEO="/path/to/your/test/video.mp4"
 
 def test_ffmpeg():
     """Test if ffmpeg is available"""
@@ -54,7 +62,7 @@ def test_video_file():
     print("\n" + "=" * 70)
     print("TEST 3: Check video file")
     print("=" * 70)
-    video_path = Path(r"C:\Users\USER\Documents\test\Screen Recording 2026-03-28 220347.mp4")
+    video_path = Path(TEST_VIDEO_PATH)
     if video_path.exists():
         size_mb = video_path.stat().st_size / (1024 * 1024)
         print(f"✓ Video file exists: {video_path}")
@@ -62,6 +70,7 @@ def test_video_file():
         return True
     else:
         print(f"✗ Video file not found: {video_path}")
+        print(f"  Set CONTEXTCORE_TEST_VIDEO environment variable to specify a test video")
         return False
 
 def test_video_duration():
@@ -69,7 +78,7 @@ def test_video_duration():
     print("\n" + "=" * 70)
     print("TEST 4: Get video duration")
     print("=" * 70)
-    video_path = Path(r"C:\Users\USER\Documents\test\Screen Recording 2026-03-28 220347.mp4")
+    video_path = Path(TEST_VIDEO_PATH)
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -89,7 +98,7 @@ def test_frame_extraction_scene():
     print("TEST 5: Test scene-based frame extraction")
     print("=" * 70)
     import tempfile
-    video_path = Path(r"C:\Users\USER\Documents\test\Screen Recording 2026-03-28 220347.mp4")
+    video_path = Path(TEST_VIDEO_PATH)
     tmpdir = Path(tempfile.mkdtemp(prefix="video_frames_test_"))
     
     try:
@@ -140,7 +149,7 @@ def test_frame_extraction_sample():
     print("TEST 6: Test sample-based frame extraction (fallback)")
     print("=" * 70)
     import tempfile
-    video_path = Path(r"C:\Users\USER\Documents\test\Screen Recording 2026-03-28 220347.mp4")
+    video_path = Path(TEST_VIDEO_PATH)
     tmpdir = Path(tempfile.mkdtemp(prefix="video_frames_sample_"))
     
     try:
@@ -208,7 +217,7 @@ def test_video_index_pipeline():
         from pathlib import Path
         
         pipeline = IndexPipeline()
-        video_path = Path(r"C:\Users\USER\Documents\test\Screen Recording 2026-03-28 220347.mp4")
+        video_path = Path(TEST_VIDEO_PATH)
         
         print(f"Testing video file: {video_path}")
         result = pipeline.index_video_file(video_path)

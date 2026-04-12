@@ -124,7 +124,8 @@ OptionList:focus > .option-list--option-highlighted {
         super().__init__()
         self._search_fn = search_fn
         self._open_fn = open_fn
-        self.DEBUG = True
+        # TODO: Remove unused DEBUG flag or make logging conditional
+        # self.DEBUG = True
         self.current_query = ""
         self._search_task = None
         self.current_modality = "text"
@@ -237,21 +238,34 @@ OptionList:focus > .option-list--option-highlighted {
         self.current_results = results  # Store for selection
         if results:
             self.log(f">>> Displaying {len(results)} {self.current_modality} results")
+            scores = [abs(float(r.get("score", 0.0))) for r in results]
+            max_score = max(scores) if scores else 0.0
             for i, r in enumerate(results):
                 path = r.get("path") or r.get("video_path") or ""
                 filename = r.get("filename") or (Path(path).name if path else "Unknown")
-                score = float(r.get("score", 0.0))
+                raw_score = abs(float(r.get("score", 0.0)))
                 cloud_tag = " [cloud]" if r.get("cloud_url") else ""
-                
-                # Determine relevance level
-                if score > 0.8:
+
+                normalized = raw_score / max_score if max_score > 0 else 0.0
+                if max_score == 0.0:
+                    if i == 0:
+                        relevance_tag = " [green]strong[/green]"
+                    elif i < 3:
+                        relevance_tag = " [yellow]medium[/yellow]"
+                    else:
+                        relevance_tag = ""
+                elif normalized >= 0.75:
                     relevance_tag = " [green]strong[/green]"
-                elif score > 0.5:
+                elif normalized >= 0.4:
                     relevance_tag = " [yellow]medium[/yellow]"
                 else:
                     relevance_tag = ""
-                
-                display_text = f"[bold]{filename}[/bold]{cloud_tag}{relevance_tag}"
+
+                if self.current_modality == "audio" and max_score > 0:
+                    score_display = f"{normalized * 100:.0f}%"
+                else:
+                    score_display = f"{raw_score:.2f}" if raw_score >= 0.01 else f"{raw_score:.2e}"
+                display_text = f"[bold]{filename}[/bold]{cloud_tag}{relevance_tag} [dim]{score_display}[/dim]"
                 results_list.add_option(Option(prompt=display_text, id=str(i)))
             results_list.highlighted = 0  # Highlight first
         else:
