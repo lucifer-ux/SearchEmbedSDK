@@ -38,7 +38,7 @@ The hybrid search combines BM25 (keyword) and embeddings (semantic) so it handle
 ---
 
 ![ContextCore Screenshot](images/image.png)
-![Contextcore search screenshot](images/search.png)
+![Contextcore search screenshot](images/searchbarui.png)
 
 ## Install
 
