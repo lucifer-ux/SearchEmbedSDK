@@ -5,10 +5,8 @@
 # so the user never has to run 'contextcore serve' manually.
 
 from __future__ import annotations
-import os
 import platform
 import subprocess
-import sys
 import time
 import re
 from pathlib import Path
@@ -131,7 +129,7 @@ def ensure_server(port: int = DEFAULT_PORT, silent: bool = False, force_restart:
         return False
 
     # Wait for server to come up (up to 15 seconds)
-    for i in range(30):
+    for attempt in range(30):
         time.sleep(0.5)
         if is_server_running(port):
             if not silent:

@@ -12,9 +12,17 @@ import subprocess
 import sys
 import importlib.util
 from pathlib import Path
+from typing import Sequence
 
 import questionary
 from questionary import Style
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 
 from cli.constants import DEFAULT_BACKEND_URL, DEFAULT_PORT
 from cli.env import refresh_process_path
@@ -28,10 +36,10 @@ from cli.ui import (
     error,
     warning,
     info,
-    hint,
     done_panel,
     set_theme,
     get_theme_name,
+    set_setup_theme,
 )
 
 _SDK_ROOT = get_sdk_root()
@@ -53,22 +61,36 @@ _STYLE_DARK = Style([
 ])
 
 _STYLE_LIGHT = Style([
-    ("qmark",        "fg:#1f4de3 bold"),
-    ("question",     "fg:#111111 bold"),
-    ("answer",       "fg:#006d77 bold"),
-    ("selected",     "fg:#006d77 bold"),
-    ("highlighted",  "fg:#1f4de3 bold"),
-    ("pointer",      "fg:#1f4de3 bold"),
-    ("separator",    "fg:#6b7280"),
+    ("qmark", "fg:#1f4de3 bold"),
+    ("question", "fg:#111111 bold"),
+    ("answer", "fg:#006d77 bold"),
+    ("selected", "fg:#006d77 bold"),
+    ("highlighted", "fg:#1f4de3 bold"),
+    ("pointer", "fg:#1f4de3 bold"),
+    ("separator", "fg:#6b7280"),
 ])
 
 _STYLE = _STYLE_DARK
 _SETUP_THEME = "dark"
+_TEXTUAL_PROMPTS_AVAILABLE = False
+_ui_show_single_select = None
+_ui_show_multi_select = None
+_ui_show_text_input = None
+_ui_show_init_welcome = None
+
+try:
+    from cli.commands.init_ui import (
+        show_init_welcome as _ui_show_init_welcome,
+        show_multi_select as _ui_show_multi_select,
+        show_single_select as _ui_show_single_select,
+        show_text_input as _ui_show_text_input,
+    )
+    _TEXTUAL_PROMPTS_AVAILABLE = True
+except Exception:
+    _TEXTUAL_PROMPTS_AVAILABLE = False
 
 
 def _choose_setup_theme(default_theme: str = "dark") -> None:
-    global _STYLE, _SETUP_THEME
-
     selected = questionary.select(
         "Choose setup theme",
         choices=[
@@ -78,15 +100,123 @@ def _choose_setup_theme(default_theme: str = "dark") -> None:
         default=default_theme if default_theme in {"dark", "light"} else "dark",
         style=_STYLE,
     ).ask()
+    _apply_setup_theme(selected or default_theme)
 
-    if selected == "light":
+
+def _apply_setup_theme(theme_name: str) -> None:
+    global _STYLE, _SETUP_THEME
+
+    if theme_name == "light":
         _STYLE = _STYLE_LIGHT
         _SETUP_THEME = "light"
     else:
         _STYLE = _STYLE_DARK
         _SETUP_THEME = "dark"
 
-    set_theme(_SETUP_THEME)
+    set_setup_theme(_SETUP_THEME)
+
+
+def _select_with_ui(
+    prompt: str,
+    options: Sequence[tuple[str, str]],
+    default: str | None = None,
+) -> str | None:
+    if _TEXTUAL_PROMPTS_AVAILABLE and _ui_show_single_select:
+        try:
+            return _ui_show_single_select(
+                prompt,
+                options,
+                default=default,
+                theme="light" if _SETUP_THEME == "light" else "dark",
+            )
+        except Exception:
+            pass
+
+    choices = [questionary.Choice(label, value=value) for label, value in options]
+    return questionary.select(
+        prompt,
+        choices=choices,
+        default=default,
+        style=_STYLE,
+    ).ask()
+
+
+def _multi_select_with_ui(
+    prompt: str,
+    options: Sequence[tuple[str, str, bool]],
+) -> list[str] | None:
+    if _TEXTUAL_PROMPTS_AVAILABLE and _ui_show_multi_select:
+        try:
+            result = _ui_show_multi_select(
+                prompt,
+                options,
+                theme="light" if _SETUP_THEME == "light" else "dark",
+            )
+            return list(result) if result is not None else None
+        except Exception:
+            pass
+
+    choices = [
+        questionary.Choice(label, value=value, checked=checked)
+        for label, value, checked in options
+    ]
+    return questionary.checkbox(prompt, choices=choices, style=_STYLE).ask()
+
+
+def _confirm_with_ui(prompt: str, default: bool = False) -> bool | None:
+    default_value = "yes" if default else "no"
+    selected = _select_with_ui(
+        prompt,
+        [("Yes", "yes"), ("No", "no")],
+        default=default_value,
+    )
+    if selected is None:
+        return None
+    return selected == "yes"
+
+
+def _text_with_ui(
+    prompt: str,
+    default: str = "",
+    placeholder: str = "",
+) -> str | None:
+    if _TEXTUAL_PROMPTS_AVAILABLE and _ui_show_text_input:
+        try:
+            return _ui_show_text_input(
+                prompt,
+                default=default,
+                placeholder=placeholder,
+                theme="light" if _SETUP_THEME == "light" else "dark",
+            )
+        except Exception:
+            pass
+    return questionary.text(prompt, default=default, style=_STYLE).ask()
+
+
+def _run_with_progress(
+    label: str,
+    command: list[str],
+    timeout: int | None = None,
+) -> subprocess.CompletedProcess[str]:
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=32),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        task_id = progress.add_task(label, total=None)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        progress.update(task_id, total=1, completed=1)
+    return result
+
 
 # ── MCP config locations ───────────────────────────────────────────────────────
 
@@ -332,50 +462,92 @@ ui_theme: '{ui_theme}'
 
 
 def _download_models(need_clip: bool, need_whisper: bool) -> bool:
-    """Install heavy optional deps with live streaming pip output."""
+    """Install heavy optional deps with compact progress output."""
     pkgs: list[tuple[str, str, str]] = []
     if need_clip:
-        pkgs.append(("CLIP / Vision model", "torch torchvision transformers", "~800MB  •  5-8 min"))
+        pkgs.append(
+            (
+                "CLIP / Vision model",
+                "torch torchvision transformers",
+                "~800MB - 5-8 min",
+            )
+        )
     if need_whisper:
-        pkgs.append(("Audio / Whisper model", "faster-whisper", "~150MB  •  1-2 min"))
+        pkgs.append(
+            (
+                "Audio / Whisper model",
+                "faster-whisper",
+                "~150MB - 1-2 min",
+            )
+        )
 
     if not pkgs:
         return True
 
     section("Downloading required models")
     console.print("  [dim]This happens once. Models are cached for future use.[/dim]")
-    console.print("  [dim]You will see pip's download output — this is normal.[/dim]\n")
+    console.print("  [dim]Showing compact install progress.[/dim]\n")
 
     for label, packages, estimate in pkgs:
-        console.print(f"  [bold]{label}[/bold]  [dim]({estimate})[/dim]")
-        # Stream pip output — no capture_output, no --quiet
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install",
-             "--progress-bar", "on",
-             "--no-cache-dir",
-             ] + packages.split(),
+        info(f"{label} ({estimate})")
+        result = _run_with_progress(
+            f"Installing {label}",
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--progress-bar",
+                "off",
+                "--no-cache-dir",
+            ]
+            + packages.split(),
         )
-        console.print()
         if result.returncode == 0:
-            if "CLIP" in label:
-                if importlib.util.find_spec("torch") is None or importlib.util.find_spec("transformers") is None:
-                    error(f"{label} install completed, but imports are still missing")
-                    console.print(f"  [dim]Retry with:[/dim] [bold]{sys.executable} -m pip install --no-cache-dir {packages}[/bold]")
-                    return False
-            if "Whisper" in label:
-                if importlib.util.find_spec("faster_whisper") is None:
-                    error(f"{label} install completed, but faster-whisper is still not importable")
-                    console.print(f"  [dim]Retry with:[/dim] [bold]{sys.executable} -m pip install --no-cache-dir {packages}[/bold]")
-                    return False
+            if "CLIP" in label and (
+                importlib.util.find_spec("torch") is None
+                or importlib.util.find_spec("transformers") is None
+            ):
+                error(f"{label} install completed, but imports are still missing")
+                console.print(
+                    "  [dim]Retry with:[/dim] "
+                    f"[bold]{sys.executable} -m pip install --no-cache-dir "
+                    f"{packages}[/bold]"
+                )
+                return False
+            if (
+                "Whisper" in label
+                and importlib.util.find_spec("faster_whisper") is None
+            ):
+                error(
+                    f"{label} install completed, but faster-whisper is still not "
+                    "importable"
+                )
+                console.print(
+                    "  [dim]Retry with:[/dim] "
+                    f"[bold]{sys.executable} -m pip install --no-cache-dir "
+                    f"{packages}[/bold]"
+                )
+                return False
             success(f"{label} installed")
-        else:
-            error(f"Failed to install {label}")
-            console.print(f"  [dim]Retry with:[/dim] [bold]{sys.executable} -m pip install --no-cache-dir {packages}[/bold]")
-            if "CLIP" in label:
-                console.print("  [dim]Or rerun:[/dim] [bold]contextcore install clip[/bold]")
-            if "Whisper" in label:
-                console.print("  [dim]Or rerun:[/dim] [bold]contextcore install audio[/bold]")
-            return False
+            continue
+
+        error(f"Failed to install {label}")
+        if result.stderr:
+            warning(result.stderr.strip().splitlines()[-1][:220])
+        console.print(
+            "  [dim]Retry with:[/dim] "
+            f"[bold]{sys.executable} -m pip install --no-cache-dir {packages}[/bold]"
+        )
+        if "CLIP" in label:
+            console.print(
+                "  [dim]Or rerun:[/dim] [bold]contextcore install clip[/bold]"
+            )
+        if "Whisper" in label:
+            console.print(
+                "  [dim]Or rerun:[/dim] [bold]contextcore install audio[/bold]"
+            )
+        return False
 
     return True
 
@@ -384,7 +556,10 @@ def _prewarm_models(need_clip: bool, need_whisper: bool) -> bool:
     ready = True
     if need_clip:
         section("Prewarming CLIP")
-        console.print("  [dim]Loading CLIP weights once so image/video indexing is immediately usable.[/dim]\n")
+        console.print(
+            "  [dim]Loading CLIP weights once so image/video indexing is "
+            "immediately usable.[/dim]\n"
+        )
         ok, err = prewarm_clip_model()
         if ok:
             success("CLIP model is ready")
@@ -394,7 +569,10 @@ def _prewarm_models(need_clip: bool, need_whisper: bool) -> bool:
 
     if need_whisper:
         section("Prewarming Whisper")
-        console.print("  [dim]Loading Whisper weights once so audio/video transcription is immediately usable.[/dim]\n")
+        console.print(
+            "  [dim]Loading Whisper weights once so audio/video transcription "
+            "is immediately usable.[/dim]\n"
+        )
         try:
             from audio_search_implementation_v2.audio_index import prewarm_whisper
 
@@ -412,9 +590,12 @@ def _prewarm_models(need_clip: bool, need_whisper: bool) -> bool:
 
 
 def _ensure_ffmpeg() -> bool:
-    """Install ffmpeg if not already present. Called during init when video is selected."""
-    import shutil
+    """Install ffmpeg if not already present.
+
+    Called during init when video is selected.
+    """
     import platform
+    import shutil
 
     section("ffmpeg (required for video)")
 
@@ -426,68 +607,92 @@ def _ensure_ffmpeg() -> bool:
         return True
 
     console.print("  [dim]Video indexing requires ffmpeg for frame extraction.[/dim]")
-    console.print("  [yellow]Installing ffmpeg now...[/yellow]\n")
-
     system = platform.system().lower()
 
     try:
         if system == "windows":
-            # winget is built-in on Windows 10 1709+ and Windows 11
-            result = subprocess.run(
-                ["winget", "install", "--id", "Gyan.FFmpeg",
-                 "--accept-package-agreements", "--accept-source-agreements",
-                 "--silent"],
-                check=False, timeout=300,
+            result = _run_with_progress(
+                "Installing ffmpeg with winget",
+                [
+                    "winget",
+                    "install",
+                    "--id",
+                    "Gyan.FFmpeg",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                    "--silent",
+                ],
+                timeout=300,
             )
             if result.returncode != 0:
-                # Fallback: chocolate / scoop not reliable — tell user manually
                 raise RuntimeError("winget install failed")
-
         elif system == "darwin":
-            result = subprocess.run(
+            result = _run_with_progress(
+                "Installing ffmpeg with Homebrew",
                 ["brew", "install", "ffmpeg"],
-                check=True, timeout=300,
+                timeout=300,
             )
-
-        else:  # Linux
-            subprocess.run(["sudo", "apt-get", "update", "-qq"], check=True, timeout=60)
-            subprocess.run(
+            if result.returncode != 0:
+                raise RuntimeError("brew install failed")
+        else:
+            update_result = _run_with_progress(
+                "Updating apt package metadata",
+                ["sudo", "apt-get", "update", "-qq"],
+                timeout=60,
+            )
+            if update_result.returncode != 0:
+                raise RuntimeError("apt-get update failed")
+            install_result = _run_with_progress(
+                "Installing ffmpeg with apt",
                 ["sudo", "apt-get", "install", "-y", "ffmpeg"],
-                check=True, timeout=300,
+                timeout=300,
             )
-
+            if install_result.returncode != 0:
+                raise RuntimeError("apt-get install ffmpeg failed")
     except (FileNotFoundError, RuntimeError):
-        # Package manager not available — show manual instructions
         warning("Could not auto-install ffmpeg.")
         if system == "windows":
-            console.print("  Install manually: [bold]winget install --id Gyan.FFmpeg --accept-package-agreements --accept-source-agreements[/bold]")
+            console.print(
+                "  Install manually: [bold]winget install --id Gyan.FFmpeg "
+                "--accept-package-agreements --accept-source-agreements[/bold]"
+            )
             console.print("  Or download from: https://ffmpeg.org/download.html")
         elif system == "darwin":
             console.print("  Install with Homebrew: [bold]brew install ffmpeg[/bold]")
         else:
             console.print("  Install with: [bold]sudo apt install ffmpeg[/bold]")
-        console.print("  [dim]Video indexing will be skipped until ffmpeg is available.[/dim]")
+        console.print(
+            "  [dim]Video indexing will be skipped until ffmpeg is available.[/dim]"
+        )
         return False
     except Exception as e:
         warning(f"ffmpeg install error: {e}")
         return False
 
     refresh_process_path()
-
-    # Verify install
     if shutil.which("ffmpeg"):
         success("ffmpeg installed successfully")
-        info("ContextCore refreshed PATH for this session. A new terminal is not required.")
+        info(
+            "ContextCore refreshed PATH for this session. A new terminal is "
+            "not required."
+        )
         persist_resolved_video_tools()
         return True
-    else:
-        warning("ffmpeg installed but not found in PATH. You may need to restart your terminal.")
-        console.print("  [dim]Retry after opening a new terminal:[/dim] [bold]contextcore index[/bold]")
-        return False
+
+    warning(
+        "ffmpeg installed but not found in PATH. You may need to restart your terminal."
+    )
+    console.print(
+        "  [dim]Retry after opening a new terminal:[/dim] "
+        "[bold]contextcore index[/bold]"
+    )
+    return False
 
 
 def _current_watch_dirs(cfg: dict[str, object]) -> list[Path]:
-    raw = cfg.get("watch_directories") or ([cfg.get("organized_root")] if cfg.get("organized_root") else [])
+    raw = cfg.get("watch_directories") or (
+        [cfg.get("organized_root")] if cfg.get("organized_root") else []
+    )
     if isinstance(raw, str):
         raw = [raw]
     return [Path(str(p)).expanduser().resolve() for p in raw if str(p).strip()]
@@ -501,11 +706,24 @@ def _show_existing_setup(cfg: dict[str, object]) -> None:
         console.print(f"  [dim]Watched folders:[/dim] [bold]{len(watch_dirs)}[/bold]")
         for path in watch_dirs[:5]:
             console.print(f"    - {path}")
-    enabled = [name for name in ("text", "code", "image", "audio", "video") if cfg.get(f"enable_{name}")]
-    console.print(f"  [dim]Enabled modalities:[/dim] [bold]{', '.join(enabled) if enabled else 'none'}[/bold]")
-    console.print(f"  [dim]Storage path:[/dim] [bold]{cfg.get('storage_path') or get_storage_path()}[/bold]")
+    enabled = [
+        name
+        for name in ("text", "code", "image", "audio", "video")
+        if cfg.get(f"enable_{name}")
+    ]
+    console.print(
+        f"  [dim]Enabled modalities:[/dim] [bold]"
+        f"{', '.join(enabled) if enabled else 'none'}[/bold]"
+    )
+    console.print(
+        f"  [dim]Storage path:[/dim] "
+        f"[bold]{cfg.get('storage_path') or get_storage_path()}[/bold]"
+    )
     auto = autostart_status()
-    console.print(f"  [dim]Autostart:[/dim] [bold]{'installed' if auto.get('installed') else 'not installed'}[/bold]")
+    console.print(
+        f"  [dim]Autostart:[/dim] "
+        f"[bold]{'installed' if auto.get('installed') else 'not installed'}[/bold]"
+    )
     console.print(f"  [dim]Backend port:[/dim] [bold]{DEFAULT_PORT}[/bold]")
 
 
@@ -538,13 +756,12 @@ def _apply_autostart_choice(should_install: bool) -> None:
 def _optional_cloud_connect_step(default: bool = False) -> None:
     section("Optional: Cloud storage")
     console.print("[dim]Connect cloud storage now?[/dim]")
-    connect_now = questionary.confirm(
-        "Set up cloud storage now?",
-        default=default,
-        style=_STYLE,
-    ).ask()
+    connect_now = _confirm_with_ui("Set up cloud storage now?", default=default)
     if not connect_now:
-        info("Skipping cloud setup for now. You can run [bold]contextcore cloudconnect[/bold] anytime.")
+        info(
+            "Skipping cloud setup for now. You can run "
+            "[bold]contextcore cloudconnect[/bold] anytime."
+        )
         return
     try:
         from cli.commands.cloudconnect import run_cloud_connect
@@ -552,17 +769,20 @@ def _optional_cloud_connect_step(default: bool = False) -> None:
         run_cloud_connect()
     except Exception as exc:
         warning(f"Cloud setup failed: {exc}")
-        console.print("  [dim]Retry later with:[/dim] [bold]contextcore cloudconnect[/bold]")
+        console.print(
+            "  [dim]Retry later with:[/dim] "
+            "[bold]contextcore cloudconnect[/bold]"
+        )
 
 
 def _run_modify_existing(existing_cfg: dict[str, object]) -> None:
     watch_dirs = _current_watch_dirs(existing_cfg)
     current_paths = ";".join(str(p) for p in watch_dirs)
-    watch_raw = questionary.text(
+    watch_raw = _text_with_ui(
         "Watch folders (semicolon-separated)",
         default=current_paths,
-        style=_STYLE,
-    ).ask()
+        placeholder="C:/Users/me/Documents;D:/Projects",
+    )
     if watch_raw is None:
         error("Setup cancelled.")
         return
@@ -576,15 +796,31 @@ def _run_modify_existing(existing_cfg: dict[str, object]) -> None:
         "video": True,
     }
     section("What would you like to search?")
-    modality_choices = [
-        questionary.Choice("Text files, PDFs, notes, documents", value="text", checked=current_modalities["text"]),
-        questionary.Choice("Code files and repositories\n      (builds a separate code context index)", value="code", checked=current_modalities["code"]),
-        questionary.Choice("Images (requires ~300MB model download)", value="image", checked=current_modalities["image"]),
-        questionary.Choice("Audio recordings and meetings\n      (requires ~150MB model download)", value="audio", checked=current_modalities["audio"]),
-        questionary.Choice("Video files\n      (requires both image and audio models)", value="video", checked=current_modalities["video"]),
+    modality_choices: list[tuple[str, str, bool]] = [
+        ("Text files, PDFs, notes, documents", "text", current_modalities["text"]),
+        (
+            "Code files and repositories (separate code index)",
+            "code",
+            current_modalities["code"],
+        ),
+        (
+            "Images (requires ~300MB model download)",
+            "image",
+            current_modalities["image"],
+        ),
+        (
+            "Audio recordings and meetings (requires ~150MB model download)",
+            "audio",
+            current_modalities["audio"],
+        ),
+        (
+            "Video files (requires both image and audio models)",
+            "video",
+            current_modalities["video"],
+        ),
     ]
-    console.print("  [dim]All modalities are pre-selected. Press [bold]Space[/bold] to uncheck any option.[/dim]")
-    selected = questionary.checkbox("Select modalities", choices=modality_choices, style=_STYLE).ask()
+    console.print("  [dim]All modalities are pre-selected.[/dim]")
+    selected = _multi_select_with_ui("Select modalities", modality_choices)
     if selected is None:
         error("Setup cancelled.")
         return
@@ -602,14 +838,22 @@ def _run_modify_existing(existing_cfg: dict[str, object]) -> None:
 
     models_ready = _download_models(need_clip=enable_image, need_whisper=enable_audio)
     if not models_ready:
-        warning("Some models failed to download. You can retry with: contextcore install clip  or  contextcore install audio")
+        warning(
+            "Some models failed to download. You can retry with: "
+            "contextcore install clip  or  contextcore install audio"
+        )
     prewarm_ready = _prewarm_models(need_clip=enable_image, need_whisper=enable_audio)
     if not prewarm_ready:
-        warning("Some models are installed but not warmed. Search and indexing may remain unavailable until prewarm succeeds.")
+        warning(
+            "Some models are installed but not warmed. Search and indexing may "
+            "remain unavailable until prewarm succeeds."
+        )
 
     updates = {
         "sdk_root": str(get_sdk_root()),
-        "organized_root": str(watch_dirs[0]) if watch_dirs else str(get_storage_path().parent),
+        "organized_root": (
+            str(watch_dirs[0]) if watch_dirs else str(get_storage_path().parent)
+        ),
         "watch_directories": [str(p) for p in watch_dirs],
         "storage_path": str(storage_path),
         "enable_text": enable_text,
@@ -626,35 +870,36 @@ def _run_modify_existing(existing_cfg: dict[str, object]) -> None:
     success(f"Config updated at [bold]{cfg_path}[/bold]")
 
     auto = autostart_status()
-    should_install_autostart = questionary.confirm(
+    should_install_autostart = _confirm_with_ui(
         "Install or repair autostart at OS login?",
         default=bool(auto.get("installed", False)) or True,
-        style=_STYLE,
-    ).ask()
+    )
     _apply_autostart_choice(bool(should_install_autostart))
 
     section("Claude tool registration")
-    refresh_tools = questionary.confirm(
+    refresh_tools = _confirm_with_ui(
         "Refresh MCP registration for your tools now?",
         default=False,
-        style=_STYLE,
-    ).ask()
+    )
     if refresh_tools:
-        tool_choices = [
-            questionary.Choice("Claude Desktop", value="Claude Desktop"),
-            questionary.Choice("Claude Code", value="Claude Code"),
-            questionary.Choice("Cline (VS Code)", value="Cline (VS Code)"),
-            questionary.Choice("Cursor", value="Cursor"),
-            questionary.Choice("OpenCode", value="OpenCode"),
-            questionary.Choice("Windsurf", value="Windsurf"),
-            questionary.Choice("Continue (VS Code)", value="Continue (VS Code)"),
+        tool_choices: list[tuple[str, str, bool]] = [
+            ("Claude Desktop", "Claude Desktop", False),
+            ("Claude Code", "Claude Code", False),
+            ("Cline (VS Code)", "Cline (VS Code)", False),
+            ("Cursor", "Cursor", False),
+            ("OpenCode", "OpenCode", False),
+            ("Windsurf", "Windsurf", False),
+            ("Continue (VS Code)", "Continue (VS Code)", False),
         ]
-        tools = questionary.checkbox("Select tools", choices=tool_choices, style=_STYLE).ask() or []
+        tools = _multi_select_with_ui("Select tools", tool_choices) or []
         for tool in tools:
             if _register_tool_with_fallback(tool):
                 success(f"Updated MCP config for {tool}")
             else:
-                error(f"Could not update {tool} config. Run  contextcore doctor  for help.")
+                error(
+                    f"Could not update {tool} config. Run  contextcore doctor  "
+                    "for help."
+                )
 
     _optional_cloud_connect_step(default=False)
 
@@ -671,8 +916,10 @@ def _run_modify_existing(existing_cfg: dict[str, object]) -> None:
     done_panel([
         "Updated existing ContextCore setup.",
         "Indexes were preserved.",
-        "Run  [bold]contextcore status[/bold]  to check server and indexing state.",
-        "After a laptop restart, ContextCore should autostart if login autostart was installed.",
+        "Run  [bold]contextcore status[/bold]  to check server and indexing "
+        "state.",
+        "After a laptop restart, ContextCore should autostart if login "
+        "autostart was installed.",
     ])
 
 
@@ -681,24 +928,43 @@ def _run_modify_existing(existing_cfg: dict[str, object]) -> None:
 def run_init() -> None:
     existing_cfg = get_config() if _DEFAULT_CONFIG.exists() else {}
     preferred_theme = str(existing_cfg.get("ui_theme") or get_theme_name())
-    _choose_setup_theme(preferred_theme)
+
+    # Show Textual welcome UI and persist theme for the whole flow.
+    try:
+        if _TEXTUAL_PROMPTS_AVAILABLE and _ui_show_init_welcome:
+            selected_theme = _ui_show_init_welcome(
+                default_theme=(
+                    preferred_theme
+                    if preferred_theme in {"dark", "light"}
+                    else "dark"
+                )
+            )
+            _apply_setup_theme(selected_theme)
+        else:
+            _choose_setup_theme(preferred_theme)
+    except (KeyboardInterrupt, SystemExit):
+        # User intentionally exited with Ctrl+C or Esc - exit completely
+        console.print("\n[dim]Setup cancelled.[/dim]")
+        return
+    except Exception:
+        # Fallback to original questionary-based selection if textual fails
+        _choose_setup_theme(preferred_theme)
+
     header()
-    console.print("[bold]Welcome to ContextCore \u2726[/bold]")
     console.print("[dim]Let's get you set up. This takes about 2 minutes.[/dim]")
     info(f"Using [bold]{_SETUP_THEME}[/bold] setup theme.")
     if existing_cfg:
         _show_existing_setup(existing_cfg)
         console.print()
-        action = questionary.select(
+        action = _select_with_ui(
             "ContextCore is already initialized. What do you want to do?",
-            choices=[
-                questionary.Choice("Modify existing setup", value="modify"),
-                questionary.Choice("Start fresh (keep indexes unless I explicitly reset them)", value="fresh"),
-                questionary.Choice("Cancel", value="cancel"),
+            [
+                ("Modify existing setup", "modify"),
+                ("Start fresh (keep indexes unless I explicitly reset them)", "fresh"),
+                ("Cancel", "cancel"),
             ],
             default="modify",
-            style=_STYLE,
-        ).ask()
+        )
         if action in {None, "cancel"}:
             warning("No changes made.")
             return
@@ -706,20 +972,18 @@ def run_init() -> None:
             _run_modify_existing(existing_cfg)
             return
 
-        confirm_reset_cfg = questionary.confirm(
+        confirm_reset_cfg = _confirm_with_ui(
             "Start fresh and overwrite the current config?",
             default=False,
-            style=_STYLE,
-        ).ask()
+        )
         if not confirm_reset_cfg:
             warning("Keeping the existing setup unchanged.")
             return
 
-        reset_indexes = questionary.confirm(
+        reset_indexes = _confirm_with_ui(
             "Also delete all existing indexes and rebuild from scratch?",
             default=False,
-            style=_STYLE,
-        ).ask()
+        )
         if reset_indexes:
             from cli.commands.helpers import reset_index_artifacts
             from cli.server import stop_server
@@ -734,32 +998,37 @@ def run_init() -> None:
 
     home = Path.home()
     presets = {
-        f"~/Documents          [dim](recommended)[/dim]": home / "Documents",
-        f"~/Desktop":                                       home / "Desktop",
-        f"~/Downloads":                                     home / "Downloads",
-        "Enter a custom path":                              None,
-        "Skip for now":                                     None,
+        "~/Documents (recommended)": home / "Documents",
+        "~/Desktop": home / "Desktop",
+        "~/Downloads": home / "Downloads",
+        "Enter a custom path": None,
+        "Skip for now": None,
     }
 
-    dir_choice = questionary.select(
+    dir_choice = _select_with_ui(
         "Select a directory",
-        choices=list(presets.keys()),
-        style=_STYLE,
-    ).ask()
+        [(label, label) for label in presets.keys()],
+    )
 
     if dir_choice is None:
         error("Setup cancelled.")
         return
 
     if "custom" in dir_choice.lower():
-        custom = questionary.text("Enter the full path:", style=_STYLE).ask()
+        custom = _text_with_ui(
+            "Enter the full path:",
+            placeholder="C:/Users/me/Documents",
+        )
         if not custom:
             error("No path given. Setup cancelled.")
             return
         watch_dir = Path(custom).expanduser().resolve()
     elif "skip" in dir_choice.lower():
         watch_dir = home / "Documents"   # a safe fallback
-        warning("Skipped. Using ~/Documents as default. Change later in ~/.contextcore/contextcore.yaml")
+        warning(
+            "Skipped. Using ~/Documents as default. Change later in "
+            "~/.contextcore/contextcore.yaml"
+        )
     else:
         watch_dir = list(presets.values())[list(presets.keys()).index(dir_choice)]
 
@@ -773,27 +1042,27 @@ def run_init() -> None:
     section("What would you like to search?")
     console.print("[dim]Select all that apply with Space, Enter to confirm.[/dim]\n")
 
-    modality_choices = [
-        questionary.Choice("Text files, PDFs, notes, documents",           value="text",  checked=True),
-        questionary.Choice("Code files and repositories\n      (builds a separate code context index)", value="code", checked=True),
-        questionary.Choice("Images (requires ~300MB model download)",      value="image", checked=True),
-        questionary.Choice("Audio recordings and meetings\n      (requires ~150MB model download)", value="audio", checked=True),
-        questionary.Choice("Video files\n      (requires both image and audio models)",  value="video", checked=True),
+    modality_choices: list[tuple[str, str, bool]] = [
+        ("Text files, PDFs, notes, documents", "text", True),
+        ("Code files and repositories (separate code index)", "code", True),
+        ("Images (requires ~300MB model download)", "image", True),
+        (
+            "Audio recordings and meetings (requires ~150MB model download)",
+            "audio",
+            True,
+        ),
+        ("Video files (requires both image and audio models)", "video", True),
     ]
-    console.print("  [dim]All modalities are pre-selected. Press [bold]Space[/bold] to uncheck any option.[/dim]")
+    console.print("  [dim]All modalities are pre-selected.[/dim]")
 
-    selected = questionary.checkbox(
-        "Select modalities",
-        choices=modality_choices,
-        style=_STYLE,
-    ).ask()
+    selected = _multi_select_with_ui("Select modalities", modality_choices)
 
     if selected is None:
         error("Setup cancelled.")
         return
 
-    enable_text  = "text"  in selected
-    enable_code  = "code"  in selected
+    enable_text = "text" in selected
+    enable_code = "code" in selected
     enable_image = "image" in selected or "video" in selected
     enable_audio = "audio" in selected or "video" in selected
     enable_video = "video" in selected
@@ -806,7 +1075,9 @@ def run_init() -> None:
 
     # ── Step 3: Storage location ──────────────────────────────────────────────
     section("Storage setup")
-    console.print("[dim]ContextCore stores your index locally in ~/.contextcore[/dim]\n")
+    console.print(
+        "[dim]ContextCore stores your index locally in ~/.contextcore[/dim]\n"
+    )
 
     # Always use ~/.contextcore for consistent storage location
     storage_path = Path.home() / ".contextcore" / "index.db"
@@ -815,10 +1086,16 @@ def run_init() -> None:
     # ── Step 4: Model downloads ───────────────────────────────────────────────
     models_ready = _download_models(need_clip=enable_image, need_whisper=enable_audio)
     if not models_ready:
-        warning("Some models failed to download. You can retry with: contextcore install clip  or  contextcore install audio")
+        warning(
+            "Some models failed to download. You can retry with: "
+            "contextcore install clip  or  contextcore install audio"
+        )
     prewarm_ready = _prewarm_models(need_clip=enable_image, need_whisper=enable_audio)
     if not prewarm_ready:
-        warning("Some models are installed but not warmed. Search and indexing may remain unavailable until prewarm succeeds.")
+        warning(
+            "Some models are installed but not warmed. Search and indexing may "
+            "remain unavailable until prewarm succeeds."
+        )
 
     # ── Step 5: Write config ──────────────────────────────────────────────────
     cfg_path = _write_yaml_config(
@@ -830,8 +1107,16 @@ def run_init() -> None:
         enable_audio=enable_audio,
         enable_video=enable_video,
         watched_dirs=[watch_dir],
-        ffmpeg_path=Path(ffmpeg_paths["ffmpeg_path"]) if ffmpeg_paths.get("ffmpeg_path") else None,
-        ffprobe_path=Path(ffmpeg_paths["ffprobe_path"]) if ffmpeg_paths.get("ffprobe_path") else None,
+        ffmpeg_path=(
+            Path(ffmpeg_paths["ffmpeg_path"])
+            if ffmpeg_paths.get("ffmpeg_path")
+            else None
+        ),
+        ffprobe_path=(
+            Path(ffmpeg_paths["ffprobe_path"])
+            if ffmpeg_paths.get("ffprobe_path")
+            else None
+        ),
         video_ocr_enabled=True,
         ui_theme=_SETUP_THEME,
     )
@@ -845,22 +1130,18 @@ def run_init() -> None:
     section("Almost done. Let's connect to Claude.")
     console.print("[dim]Which Claude tools do you use?[/dim]\n")
 
-    tool_choices = [
-        questionary.Choice("Claude Desktop",      value="Claude Desktop"),
-        questionary.Choice("Claude Code",         value="Claude Code"),
-        questionary.Choice("Cline (VS Code)",     value="Cline (VS Code)"),
-        questionary.Choice("Cursor",              value="Cursor"),
-        questionary.Choice("OpenCode",            value="OpenCode"),
-        questionary.Choice("Windsurf",            value="Windsurf"),
-        questionary.Choice("Continue (VS Code)",  value="Continue (VS Code)"),
-        questionary.Choice("None yet — I'll set this up later", value="none"),
+    tool_choices: list[tuple[str, str, bool]] = [
+        ("Claude Desktop", "Claude Desktop", False),
+        ("Claude Code", "Claude Code", False),
+        ("Cline (VS Code)", "Cline (VS Code)", False),
+        ("Cursor", "Cursor", False),
+        ("OpenCode", "OpenCode", False),
+        ("Windsurf", "Windsurf", False),
+        ("Continue (VS Code)", "Continue (VS Code)", False),
+        ("None yet - I'll set this up later", "none", False),
     ]
 
-    tools = questionary.checkbox(
-        "Select tools",
-        choices=tool_choices,
-        style=_STYLE,
-    ).ask()
+    tools = _multi_select_with_ui("Select tools", tool_choices)
 
     if tools is None:
         error("Setup cancelled.")
@@ -875,7 +1156,10 @@ def run_init() -> None:
             success("Config saved")
             registered.append(tool)
         else:
-            error(f"Could not update {tool} config. Run  contextcore doctor  for help.")
+            error(
+                f"Could not update {tool} config. Run  contextcore doctor  "
+                "for help."
+            )
 
     if not selected_tools:
         # Non-blocking auto registration for detected tools (if any).
@@ -892,7 +1176,10 @@ def run_init() -> None:
                 tools_def = get_tool_definitions()
                 detected = detect_installed_tools(tools_def)
                 if detected:
-                    info("No tools selected; attempting auto-registration for detected tools...")
+                    info(
+                        "No tools selected; attempting auto-registration for "
+                        "detected tools..."
+                    )
                     reverse = {v: k for k, v in _REGISTER_TOOL_KEY_BY_LABEL.items()}
                     from register_mcp import register_tool
 
@@ -900,7 +1187,13 @@ def run_init() -> None:
                         spec = tools_def.get(key)
                         if not spec:
                             continue
-                        if register_tool(key, spec, python_path, mcp_path, dry_run=False):
+                        if register_tool(
+                            key,
+                            spec,
+                            python_path,
+                            mcp_path,
+                            dry_run=False,
+                        ):
                             label = reverse.get(key, key)
                             registered.append(label)
         except Exception as exc:
@@ -908,28 +1201,42 @@ def run_init() -> None:
 
     if registered:
         console.print()
-        console.print("  [bold yellow]Action needed:[/bold yellow] Restart the following tools for changes to take effect:")
+        console.print(
+            "  [bold yellow]Action needed:[/bold yellow] Restart the "
+            "following tools for changes to take effect:"
+        )
         for t in registered:
             console.print(f"    \u2022 {t}")
 
         if "Claude Desktop" in registered or "Claude Code" in registered:
-            questionary.text(
-                "\nPress Enter when you have restarted Claude...",
-                style=_STYLE,
-            ).ask()
+            _text_with_ui(
+                "Press Enter when you have restarted Claude...",
+                default="",
+                placeholder="",
+            )
 
             console.print("\n  Verifying connection...")
             mcp_script = get_mcp_script()
             try:
-                result = subprocess.run(
+                subprocess.run(
                     [sys.executable, str(mcp_script), "--help"],
-                    capture_output=True, timeout=8
+                    capture_output=True,
+                    timeout=8,
                 )
                 success("ContextCore MCP server is running")
-                success("Claude can now see your tools: search, index_content, list_sources, fetch_content")
+                success(
+                    "Claude can now see your tools: search, index_content, "
+                    "list_sources, fetch_content"
+                )
             except Exception:
-                warning("Could not verify MCP server. Run  contextcore doctor  to diagnose.")
-                console.print(f"  [dim]Retry MCP check:[/dim] [bold]{sys.executable} \"{mcp_script}\" --help[/bold]")
+                warning(
+                    "Could not verify MCP server. Run  contextcore doctor  "
+                    "to diagnose."
+                )
+                console.print(
+                    "  [dim]Retry MCP check:[/dim] "
+                    f"[bold]{sys.executable} \"{mcp_script}\" --help[/bold]"
+                )
 
     # ── Step 7: Kick off initial index ────────────────────────────────────────
     _optional_cloud_connect_step(default=False)
@@ -941,11 +1248,21 @@ def run_init() -> None:
         file_count = sum(1 for _ in watch_dir.rglob("*") if _.is_file())
         info(f"Found [bold]{file_count:,}[/bold] files")
         est_mins = max(1, round(file_count / 500))
-        info(f"Text files will be searchable in about [bold]{est_mins} minute{'s' if est_mins > 1 else ''}[/bold]")
+        info(
+            f"Text files will be searchable in about [bold]{est_mins} "
+            f"minute{'s' if est_mins > 1 else ''}[/bold]"
+        )
         if enable_code:
-            info("Code indexing runs separately and may take longer on larger repositories.")
+            info(
+                "Code indexing runs separately and may take longer on larger "
+                "repositories."
+            )
         info("Running in background — you can use Claude now.")
-        info("Use [bold]contextcore status[/bold] to watch progress or [bold]contextcore add-folder \"C:/path\"[/bold] to add more folders later.")
+        info(
+            "Use [bold]contextcore status[/bold] to watch progress or "
+            "[bold]contextcore add-folder \"C:/path\"[/bold] to add more "
+            "folders later."
+        )
     except Exception:
         info("Could not count files — scanning in background.")
 
@@ -962,13 +1279,18 @@ def run_init() -> None:
 
     # ── Done ──────────────────────────────────────────────────────────────────
     done_panel([
-        'Try asking Claude: [bold cyan]"Search my documents for anything about project budgets"[/bold cyan]',
+        (
+            'Try asking Claude: [bold cyan]"Search my documents for anything '
+            'about project budgets"[/bold cyan]'
+        ),
         "",
-        f"Your index is building in the background.",
+        "Your index is building in the background.",
         "The background watcher stays active while ContextCore is running.",
         "Run  [bold]contextcore status[/bold]  to check progress.",
-        "ContextCore is configured to autostart on login when installation succeeds.",
-        "If your machine was restarted and it is not running yet, run  [bold]contextcore serve[/bold].",
+        "ContextCore is configured to autostart on login when installation "
+        "succeeds.",
+        "If your machine was restarted and it is not running yet, run  "
+        "[bold]contextcore serve[/bold].",
     ])
 
 
@@ -984,38 +1306,76 @@ def _start_server_and_scan(
     """Start the FastAPI server and fire off the initial background scan."""
     from cli.server import ensure_server
 
-    # Auto-start server (waits until it's actually ready)
-    if not ensure_server(force_restart=force_restart_server):
-        warning("Server could not start. Run  contextcore serve  manually in a terminal.")
-        console.print("  [dim]Copy/paste:[/dim] [bold]contextcore serve[/bold]")
-        return
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=32),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        task_id = progress.add_task("Preparing indexing pipeline", total=100)
 
-    # Fire the scan
-    try:
-        import urllib.request
-        import urllib.parse
-        query = {
-            "run_text": str(text).lower(),
-            "run_code": str(code).lower(),
-            "run_image": str(image).lower(),
-            "run_video": str(video).lower(),
-            "run_audio": str(audio).lower(),
-        }
-        if watch_dir is not None:
-            query["target_dir"] = str(watch_dir)
-            if code:
-                query["code_path"] = str(watch_dir)
-        params = urllib.parse.urlencode(query)
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{DEFAULT_PORT}/index/scan?{params}",
-            method="POST",
+        if not ensure_server(force_restart=force_restart_server):
+            progress.update(task_id, completed=100)
+            warning(
+                "Server could not start. Run  contextcore serve  manually in a "
+                "terminal."
+            )
+            console.print("  [dim]Copy/paste:[/dim] [bold]contextcore serve[/bold]")
+            return
+        progress.update(
+            task_id,
+            completed=55,
+            description="Server ready, queueing indexing job",
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            payload = json.loads(resp.read().decode("utf-8", errors="ignore") or "{}")
-        if payload.get("status") == "busy":
-            warning("Indexing is already running. ContextCore kept the existing job.")
-            console.print("  [dim]Run  [bold]contextcore status[/bold]  to check progress.[/dim]")
-        else:
-            success("Background indexing started")
-    except Exception:
-        info("Server is running — indexing will begin shortly.")
+
+        try:
+            import urllib.request
+            import urllib.parse
+
+            query = {
+                "run_text": str(text).lower(),
+                "run_code": str(code).lower(),
+                "run_image": str(image).lower(),
+                "run_video": str(video).lower(),
+                "run_audio": str(audio).lower(),
+            }
+            if watch_dir is not None:
+                query["target_dir"] = str(watch_dir)
+                if code:
+                    query["code_path"] = str(watch_dir)
+
+            params = urllib.parse.urlencode(query)
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{DEFAULT_PORT}/index/scan?{params}",
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                payload = json.loads(
+                    resp.read().decode("utf-8", errors="ignore") or "{}"
+                )
+
+            progress.update(
+                task_id,
+                completed=100,
+                description="Indexing request submitted",
+            )
+            if payload.get("status") == "busy":
+                warning(
+                    "Indexing is already running. ContextCore kept the existing "
+                    "job."
+                )
+                console.print(
+                    "  [dim]Run  [bold]contextcore status[/bold]  to check "
+                    "progress.[/dim]"
+                )
+            else:
+                success("Background indexing started")
+        except Exception:
+            progress.update(
+                task_id,
+                completed=100,
+                description="Server ready; indexing will start shortly",
+            )
+            info("Server is running - indexing will begin shortly.")

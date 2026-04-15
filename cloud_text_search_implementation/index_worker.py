@@ -138,13 +138,13 @@ def discover_text_files(remote: str) -> int:
     inserted = 0
     try:
         with conn:
-            for item in files:
-                if item.get("IsDir"):
+            for file_item in files:
+                if file_item.get("IsDir"):
                     continue
-                path = str(item.get("Path") or "")
+                path = str(file_item.get("Path") or "")
                 if not path or not _is_text_file(path):
                     continue
-                if insert_manifest(conn, item, remote):
+                if insert_manifest(conn, file_item, remote):
                     inserted += 1
     finally:
         conn.close()

@@ -2,7 +2,10 @@
 run_tests.py - Simple ASCII test runner for the implementation verification.
 Works around Windows terminal encoding issues.
 """
-import sys, os
+import os
+import sys
+
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 passed = 0
@@ -10,11 +13,12 @@ failed = 0
 skipped = 0
 results = []
 
+
 def test(name, fn):
     global passed, failed, skipped
     try:
-        r = fn()
-        if r == "SKIP":
+        test_result = fn()
+        if test_result == "SKIP":
             results.append(("SKIP", name, "dependency not installed"))
             skipped += 1
         else:

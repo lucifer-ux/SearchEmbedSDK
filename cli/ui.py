@@ -21,16 +21,16 @@ _THEME_PRESETS = {
         "muted": "#A0AEC0",
     },
     "light": {
-        "info": "bold #2B6CB0",
-        "success": "bold #2F855A",
-        "warning": "bold #B7791F",
-        "error": "bold #C53030",
-        "dim": "#4A5568",
-        "header": "bold #1A202C",
-        "title": "bold #2C5282",
-        "panel_border": "#CBD5E0",
-        "section_border": "#A0AEC0",
-        "muted": "#4A5568",
+        "info": "bold #8A5A00",
+        "success": "bold #2F6B3A",
+        "warning": "bold #B66A00",
+        "error": "bold #A63B28",
+        "dim": "#5A4A2A",
+        "header": "bold #4D3B1A",
+        "title": "bold #7A5200",
+        "panel_border": "#D5BE85",
+        "section_border": "#C7AA65",
+        "muted": "#6B5830",
     },
 }
 
@@ -90,6 +90,35 @@ _TITLE_SUFFIX = " \u2726" if _UNICODE_OK else ""
 
 def get_theme_name() -> str:
     return _ACTIVE_THEME_NAME
+
+
+def _get_setup_theme_from_config() -> str:
+    """Get the setup theme from config, falling back to active theme."""
+    try:
+        from config import get_config
+        raw = get_config().get("ui_theme")
+        return _resolve_theme_name(raw)
+    except Exception:
+        return _ACTIVE_THEME_NAME
+
+
+def get_setup_theme() -> str:
+    """Returns the theme selected during init (from config or runtime)."""
+    return _get_setup_theme_from_config()
+
+
+def set_setup_theme(theme_name: str) -> str:
+    """Sets both setup theme (config) and runtime theme (console)."""
+    resolved = _resolve_theme_name(theme_name)
+    set_theme(resolved)
+    try:
+        from config import get_config, update_config_values
+        existing = get_config()
+        if existing.get("ui_theme") != resolved:
+            update_config_values({"ui_theme": resolved})
+    except Exception:
+        pass
+    return resolved
 
 
 def set_theme(theme_name: str) -> str:

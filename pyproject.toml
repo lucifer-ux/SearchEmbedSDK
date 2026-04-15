@@ -31,6 +31,7 @@ dependencies = [
     "typer",
     "rich",
     "questionary",
+    "textual",
     "watchdog",
     "requests",
     "numpy",
@@ -49,6 +50,7 @@ all    = ["torch", "torchvision", "transformers", "faster-whisper"]
 dev = [
     "pytest",
     "pytest-timeout",
+    "flake8",
     "build",
     "twine",
 ]
