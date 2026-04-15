@@ -1,16 +1,45 @@
 # ContextCore
 
-Search all your local data — notes, code, recordings, images — 
-and send only what matters to AI.
+> One MCP server for all your local files. Search everything, send only what matters to AI.
 
-> Reduce LLM context tokens by ~57% on SciFact benchmark settings.
+Stop pasting entire files into Claude. ContextCore indexes your notes, code, documents, images, audio, and video locally — then exposes a single MCP server that any AI tool can query. Instead of bloating your context window, Claude searches first and retrieves only the relevant chunks.
+
+**57% fewer tokens. Same answers. No cloud.**
 
 | Benchmark Setup | Baseline Context | ContextCore Context | Reduction |
-|---------------|------------------|---------------------|-----------|
+|----------------|------------------|---------------------|-----------|
 | SciFact (top-5 retrieved docs vs chunked context) | 1,723.5 tokens/query | 733.4 tokens/query | **57.45%** |
 
+Works with: **Claude Desktop · Claude Code · Cursor · Cline · OpenCode · any MCP-compatible tool**
+
+---
+
+## Why ContextCore?
+
+Most developers working across large codebases or document collections hit the same wall: pasting everything into context is expensive, slow, and hits limits. RAG pipelines require infrastructure. Other memory tools are cloud-only or single-format.
+
+ContextCore is a local-first MCP server that does hybrid search (BM25 + embeddings) across every file type you care about — and registers itself with your AI tools automatically. One install. One server. All your data.
+
+It is not Supermemory. It does not sync to a cloud. Your files stay on your machine. What it gives you is supercharged retrieval across every local file format, surfaced directly inside Claude and other tools via MCP.
+
+This is the **one MCP to rule them all** design: instead of managing separate MCP servers for different file types, you have one local server with a consistent search API across text, code, images, audio, and video.
+
+---
+
+## How It Works
+
+1. `contextcore init` — indexes your chosen folders (text, code, images, audio, video)
+2. Registers as an MCP server with Claude Desktop, Claude Code, Cursor, or Cline
+3. When you ask Claude about your files, ContextCore intercepts with a `search` tool call
+4. Only the top matching chunks are injected into context — not the whole file
+
+The hybrid search combines BM25 (keyword) and embeddings (semantic) so it handles both exact lookups ("find the function called parse_config") and fuzzy concept searches ("where did I write about the retry logic?").
+
+---
+
 ![ContextCore Screenshot](images/image.png)
-![Contextcore search screenshot](images/search.png)
+![Contextcore search screenshot](images/searchbarui.png)
+
 ## Install
 
 Install from PyPI:
@@ -32,13 +61,11 @@ Then run the setup wizard:
 contextcore init
 ```
 
-![ContextCore Setup](images/Demonstration.gif)
+![ContextCore Setup](images/demoImplementation.gif)
 
 Gif is sped up to skip the installation parts.
-This is not supermemory, but supercharged memory for all file formats shared all across.
 
-That's it. ContextCore indexes your files, registers with your AI tools, 
-and runs in the background. No config files to edit.
+That's it. ContextCore indexes your files, registers with your AI tools, and runs in the background. No config files to edit.
 
 ## Prerequisites
 
@@ -62,7 +89,7 @@ ContextCore gives you:
   - images
   - audio transcripts
   - video embeddings and video context
-  - codebase context  (structure, symbols, dependencies, file-level detail)
+  - codebase context (structure, symbols, dependencies, file-level detail)
 
 ## Codebase Context for Claude/OpenCode
 
