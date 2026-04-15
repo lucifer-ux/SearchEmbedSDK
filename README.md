@@ -1,5 +1,10 @@
 # ContextCore
 
+![PyPI version](https://img.shields.io/pypi/v/contextcore)
+![Python](https://img.shields.io/pypi/pyversions/contextcore)
+![License](https://img.shields.io/github/license/lucifer-ux/SearchEmbedSDK)
+![Stars](https://img.shields.io/github/stars/lucifer-ux/SearchEmbedSDK?style=social)
+
 > One MCP server for all your local files. Search everything, send only what matters to AI.
 
 Stop pasting entire files into Claude. ContextCore indexes your notes, code, documents, images, audio, and video locally — then exposes a single MCP server that any AI tool can query. Instead of bloating your context window, Claude searches first and retrieves only the relevant chunks.
@@ -45,7 +50,7 @@ The hybrid search combines BM25 (keyword) and embeddings (semantic) so it handle
 Install from PyPI:
 
 ```powershell
-python -m pip install contextcore==1.0.0
+python -m pip install contextcore
 ```
 
 Optional source install (for contributors):
@@ -450,7 +455,7 @@ Cause:
 Fix:
 
 ```powershell
-python -m pip install contextcore==1.0.0
+python -m pip install contextcore
 ```
 
 ### 2. `contextcore init` fails on import errors
@@ -463,7 +468,7 @@ Fix:
 
 ```powershell
 python -m pip install --upgrade pip
-python -m pip install --force-reinstall contextcore==1.0.0
+python -m pip install --force-reinstall contextcore
 ```
 
 If you are developing from source instead of PyPI:
