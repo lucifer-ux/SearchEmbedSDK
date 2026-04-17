@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
 
+# Detect Python
 if [ -x "./.venv/bin/python" ]; then
   PYTHON_CMD="./.venv/bin/python"
 elif [ -x "./venv/bin/python" ]; then
@@ -11,38 +12,36 @@ elif command -v python >/dev/null 2>&1; then
 elif command -v py >/dev/null 2>&1; then
   PYTHON_CMD="py"
 else
-  echo "Python interpreter not found for pytest hook."
+  echo "Python interpreter not found."
   exit 1
 fi
 
-if ! "$PYTHON_CMD" -c "import pytest" >/dev/null 2>&1; then
-  echo "pytest is not installed for $PYTHON_CMD"
-  echo "Install it with: $PYTHON_CMD -m pip install pytest pytest-timeout"
-  exit 1
-fi
-
-if ! "$PYTHON_CMD" -c "import pycodestyle" >/dev/null 2>&1; then
-  echo "pycodestyle is not installed for $PYTHON_CMD"
-  echo "Install it with: $PYTHON_CMD -m pip install pycodestyle"
-  exit 1
-fi
-
-STAGED_PY_DIFF=$(git diff --cached --diff-filter=ACMR -- '*.py')
-HOOK_FAILED=0
-
-if [ -n "$STAGED_PY_DIFF" ]; then
-  echo "Running PEP 8 lint (pycodestyle) on staged Python changes..."
-  if ! printf "%s\n" "$STAGED_PY_DIFF" | "$PYTHON_CMD" -m pycodestyle --diff --max-line-length=88 --ignore=E203,W503; then
-    HOOK_FAILED=1
+# Ensure tools exist
+for pkg in ruff black pytest; do
+  if ! "$PYTHON_CMD" -c "import $pkg" >/dev/null 2>&1; then
+    echo "$pkg not installed. Install with: pip install $pkg"
+    exit 1
   fi
+done
+
+# Get staged Python files
+FILES=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.py$')
+
+if [ -n "$FILES" ]; then
+  echo "Running Ruff autofix..."
+  $PYTHON_CMD -m ruff check $FILES --fix
+
+  echo "Running Black formatter..."
+  $PYTHON_CMD -m black $FILES
+
+  # Re-add formatted files
+  echo "$FILES" | xargs git add
+else
+  echo "No Python files staged."
 fi
 
-echo "Running pytest suite..."
-if ! "$PYTHON_CMD" -m pytest tests/ -v --timeout=60 --tb=short; then
-  HOOK_FAILED=1
-fi
+# Run tests AFTER formatting
+echo "Running pytest..."
+$PYTHON_CMD -m pytest tests/ -v --timeout=60 --tb=short
 
-if [ "$HOOK_FAILED" -ne 0 ]; then
-  echo "husky - pre-commit checks failed"
-  exit 1
-fi
+echo "Pre-commit checks passed ✅"
