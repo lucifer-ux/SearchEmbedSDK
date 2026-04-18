@@ -32,14 +32,12 @@ from cli.lifecycle import (
     read_index_state,
 )
 from cli.paths import get_sdk_root
-from cli.ui import get_theme_name, get_setup_theme
+from cli.ui import get_theme_name
 
 _SDK_ROOT = get_sdk_root()
 if str(_SDK_ROOT) not in sys.path:
     sys.path.insert(0, str(_SDK_ROOT))
 
-from video_search_implementation_v2.runtime import video_runtime_status  # noqa: E402
-from config import get_enable_code, get_watch_directories, get_storage_dir  # noqa: E402
 
 @dataclass(frozen=True)
 class ModalitySnapshot:
@@ -112,6 +110,7 @@ class StatusSnapshot:
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
+
 def _count(db: Path, query: str) -> int:
     if not db.exists():
         return -1
@@ -128,12 +127,11 @@ def _count_code_tokens(db: Path) -> tuple[int, int]:
     try:
         with sqlite3.connect(str(db)) as conn:
             line_count = (
-                conn.execute("SELECT SUM(line_count) FROM project_files")
-                .fetchone()[0] or 0
+                conn.execute("SELECT SUM(line_count) FROM project_files").fetchone()[0]
+                or 0
             )
             symbol_count = (
-                conn.execute("SELECT COUNT(*) FROM code_symbols")
-                .fetchone()[0] or 0
+                conn.execute("SELECT COUNT(*) FROM code_symbols").fetchone()[0] or 0
             )
             return int(line_count), int(symbol_count)
     except Exception:
@@ -375,6 +373,7 @@ Screen {
 
 # ── Widgets ───────────────────────────────────────────────────────────────────
 
+
 class MetricCard(Widget):
     """A labelled metric with a value."""
 
@@ -399,6 +398,8 @@ class MetricCard(Widget):
 
 class StatusBadge(Static):
     """Inline ■ SYSTEM ONLINE / OFFLINE badge."""
+
+
 def _estimate_naive_tokens(text_bytes: int) -> int:
     """~4 bytes per token is standard GPT-style BPE approximation."""
     return max(0, text_bytes // 4)
@@ -458,7 +459,7 @@ def _truncate_path(value: str, width: int = 72) -> str:
         return value
     if width <= 3:
         return value[:width]
-    return f"…{value[-(width - 1):]}"
+    return f"{value[: width - 3]}..."
 
 
 def _config_path() -> Path:
@@ -523,6 +524,7 @@ def _sparkline(values: list[int], unicode_ok: bool = True) -> str:
 
 # ── Main App ──────────────────────────────────────────────────────────────────
 
+
 class StatusDashboard(App):
     """ContextCore status dashboard with Textual UI."""
 
@@ -543,6 +545,7 @@ class StatusDashboard(App):
 
     def _gather_data(self) -> dict:
         from cli.server import ensure_server, is_server_running
+
         ensure_server(port=self._port, silent=True)
         server_ok = is_server_running(self._port)
         runtime = video_runtime_status()
@@ -588,9 +591,7 @@ class StatusDashboard(App):
         if not active_lock:
             lock_state = read_index_state()
 
-        last_index_date = (
-            lock_state.get("completed_at") or lock_state.get("started_at")
-        )
+        last_index_date = lock_state.get("completed_at") or lock_state.get("started_at")
 
         watch_dirs = get_watch_directories()
         cfg = Path.home() / ".contextcore" / "contextcore.yaml"
@@ -599,10 +600,9 @@ class StatusDashboard(App):
         cloud_connected = False
         try:
             from config import get_config
+
             cloud_cfg = get_config()
-            cloud_connected = bool(
-                cloud_cfg.get("storage", {}).get("cloud")
-            )
+            cloud_connected = bool(cloud_cfg.get("storage", {}).get("cloud"))
         except Exception:
             pass
 
@@ -639,7 +639,6 @@ class StatusDashboard(App):
         yield Rule(classes="divider")
 
         with ScrollableContainer():
-
             # ── System Info ───────────────────────────────────────────────────
             with Vertical(classes="card"):
                 yield Label("SYSTEM INFO", classes="section-label")
@@ -654,17 +653,16 @@ class StatusDashboard(App):
                 yield Label(
                     "MCP: Found" if mcp_script.exists() else "MCP: Missing",
                     classes=(
-                        "metric-value" if mcp_script.exists()
-                        else "metric-value-error"
+                        "metric-value" if mcp_script.exists() else "metric-value-error"
                     ),
                 )
 
                 runtime = data["runtime"]
                 yield Label(
-                    "FFmpeg: Ready" if runtime["ffmpeg_path"]
-                    else "FFmpeg: Not Found",
+                    "FFmpeg: Ready" if runtime["ffmpeg_path"] else "FFmpeg: Not Found",
                     classes=(
-                        "metric-value" if runtime["ffmpeg_path"]
+                        "metric-value"
+                        if runtime["ffmpeg_path"]
                         else "metric-value-warn"
                     ),
                 )
@@ -681,10 +679,7 @@ class StatusDashboard(App):
                 )
                 yield Label(
                     f"Autostart: {autostart_status_str}",
-                    classes=(
-                        "metric-value" if auto.get("installed")
-                        else "metric-dim"
-                    ),
+                    classes=("metric-value" if auto.get("installed") else "metric-dim"),
                 )
 
             # ── Index Stats ───────────────────────────────────────────────────
@@ -741,9 +736,7 @@ class StatusDashboard(App):
 
             watch_dirs = data["watch_dirs"]
             if watch_dirs:
-                wtable: DataTable = DataTable(
-                    id="watch-table", show_cursor=False
-                )
+                wtable: DataTable = DataTable(id="watch-table", show_cursor=False)
                 wtable.add_columns("#", "Path", "Status")
                 for idx, path in enumerate(watch_dirs, 1):
                     status = "exists" if path.exists() else "missing"
@@ -751,8 +744,7 @@ class StatusDashboard(App):
                 yield wtable
             else:
                 yield Label(
-                    "No watch folders configured."
-                    " Run 'contextcore init' to set up.",
+                    "No watch folders configured. Run 'contextcore init' to set up.",
                     classes="metric-value-warn",
                 )
 
@@ -777,6 +769,7 @@ class StatusDashboard(App):
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
+
 def _fmt_tokens(n: int) -> str:
     """Format token count with K/M suffix."""
     if n < 0:
@@ -799,6 +792,7 @@ def _fmt_files(n: int) -> str:
 
 
 # ─────────────────────────── Snapshot collector ─────────────────────
+
 
 def _collect_status_snapshot(port: int = DEFAULT_PORT) -> StatusSnapshot:
     sdk_root = get_sdk_root()
@@ -924,7 +918,7 @@ def _collect_status_snapshot(port: int = DEFAULT_PORT) -> StatusSnapshot:
         estimated_payload = (
             max(0, text_total) * 2048
             + max(0, code_total) * 200
-            + max(0, image_total) * 64   # minimal metadata
+            + max(0, image_total) * 64  # minimal metadata
             + max(0, audio_total) * 128
             + max(0, video_total) * 256
         )
@@ -941,9 +935,7 @@ def _collect_status_snapshot(port: int = DEFAULT_PORT) -> StatusSnapshot:
 
     cfg = _config_path()
     config_ok = cfg.exists()
-    config_label = (
-        str(cfg) if config_ok else "No config — run contextcore init"
-    )
+    config_label = str(cfg) if config_ok else "No config — run contextcore init"
 
     auto = autostart_status()
     autostart_ok = bool(auto.get("installed"))
@@ -1076,7 +1068,9 @@ def _collect_status_snapshot(port: int = DEFAULT_PORT) -> StatusSnapshot:
     # Sparkline data: use saved-token series for token chart; daily indexed for files
     # If all zeros (new install with no daily activity), spread the lifetime total
     # evenly so the sparkline isn't blank.
-    _tok_spark = token_saved_series if any(token_saved_series) else [total_tokens_saved] * 7
+    _tok_spark = (
+        token_saved_series if any(token_saved_series) else [total_tokens_saved] * 7
+    )
     _idx_spark = indexed_totals if any(indexed_totals) else [total_files_indexed] * 7
 
     top_files = [
@@ -1101,12 +1095,14 @@ def _collect_status_snapshot(port: int = DEFAULT_PORT) -> StatusSnapshot:
         b_line = _sparkline(b_values, unicode_ok=unicode_ok)
         a_display = a_lifetime if a_lifetime > 0 else (a_values[-1] if a_values else 0)
         b_display = b_lifetime if b_lifetime > 0 else (b_values[-1] if b_values else 0)
-        return "\n".join([
-            f"[b]{title}[/b]",
-            f"{a_name}: {a_line}  ({a_display:,})",
-            f"{b_name}: {b_line}  ({b_display:,})",
-            f"[dim]Days: {axis}[/dim]",
-        ])
+        return "\n".join(
+            [
+                f"[b]{title}[/b]",
+                f"{a_name}: {a_line}  ({a_display:,})",
+                f"{b_name}: {b_line}  ({b_display:,})",
+                f"[dim]Days: {axis}[/dim]",
+            ]
+        )
 
     token_vs_graph = _line_graph_simple(
         title="Token savings vs naive (7d)",
@@ -1168,26 +1164,25 @@ def _collect_status_snapshot(port: int = DEFAULT_PORT) -> StatusSnapshot:
 # ─────────────────────────── TUI ────────────────────────────────────
 
 _HEALTH_COLOR = {
-    "good":     "green",
-    "warn":     "yellow",
+    "good": "green",
+    "warn": "yellow",
     "critical": "red",
 }
 
 _LEVEL_COLOR = {
-    "ok":       "green",
-    "warn":     "yellow",
+    "ok": "green",
+    "warn": "yellow",
     "critical": "red",
 }
 
 _STATUS_ICON = {
-    "ok":       "●",
-    "warn":     "◐",
+    "ok": "●",
+    "warn": "◐",
     "critical": "✖",
 }
 
 
 class StatusDashboardApp(App[None]):
-
     CSS = """
     Screen {
         background: $surface;
@@ -1379,7 +1374,6 @@ class StatusDashboardApp(App[None]):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with VerticalScroll(id="root"):
-
             # ── Hero ────────────────────────────────────────────────
             with Vertical(id="hero"):
                 yield Static("ContextCore  ·  Status Dashboard", id="hero-title")
@@ -1388,9 +1382,9 @@ class StatusDashboardApp(App[None]):
             # ── KPI row ─────────────────────────────────────────────
             yield Static("  Overview", classes="section-heading")
             with Horizontal(classes="kpi-row"):
-                yield Static(id="kpi-files",   classes="kpi-card")
-                yield Static(id="kpi-naive",   classes="kpi-card")
-                yield Static(id="kpi-saved",   classes="kpi-card")
+                yield Static(id="kpi-files", classes="kpi-card")
+                yield Static(id="kpi-naive", classes="kpi-card")
+                yield Static(id="kpi-saved", classes="kpi-card")
                 yield Static(id="kpi-reduced", classes="kpi-card")
 
             # ── Sparkline row ───────────────────────────────────────
@@ -1408,9 +1402,9 @@ class StatusDashboardApp(App[None]):
             # ── Status cards ────────────────────────────────────────
             yield Static("  Services", classes="section-heading")
             with Horizontal(classes="status-row"):
-                yield Static(id="card-server",    classes="status-card")
-                yield Static(id="card-mcp",       classes="status-card")
-                yield Static(id="card-index",     classes="status-card")
+                yield Static(id="card-server", classes="status-card")
+                yield Static(id="card-mcp", classes="status-card")
+                yield Static(id="card-index", classes="status-card")
                 yield Static(id="card-autostart", classes="status-card")
 
             # ── Modalities table ────────────────────────────────────
@@ -1524,25 +1518,31 @@ class StatusDashboardApp(App[None]):
 
         health_color = _HEALTH_COLOR.get(snap.token_health, "yellow")
         self.query_one("#kpi-naive", Static).update(
-            "\n".join([
-                "[dim]Naive tokens (unoptimised)[/dim]",
-                f"[bold]{_fmt_tokens(snap.token_naive)}[/bold]",
-                "[dim]Without ContextCore[/dim]",
-            ])
+            "\n".join(
+                [
+                    "[dim]Naive tokens (unoptimised)[/dim]",
+                    f"[bold]{_fmt_tokens(snap.token_naive)}[/bold]",
+                    "[dim]Without ContextCore[/dim]",
+                ]
+            )
         )
         self.query_one("#kpi-saved", Static).update(
-            "\n".join([
-                "[dim]Tokens saved[/dim]",
-                f"[bold {health_color}]{_fmt_tokens(snap.total_tokens_saved)}[/bold {health_color}]",
-                f"[dim]→ {_fmt_tokens(snap.token_optimized)} optimised[/dim]",
-            ])
+            "\n".join(
+                [
+                    "[dim]Tokens saved[/dim]",
+                    f"[bold {health_color}]{_fmt_tokens(snap.total_tokens_saved)}[/bold {health_color}]",
+                    f"[dim]→ {_fmt_tokens(snap.token_optimized)} optimised[/dim]",
+                ]
+            )
         )
         self.query_one("#kpi-reduced", Static).update(
-            "\n".join([
-                "[dim]Reduction[/dim]",
-                f"[bold {health_color}]{snap.token_reduction_pct:.1f}%[/bold {health_color}]",
-                f"[dim][{health_color}]{snap.token_health.upper()}[/{health_color}][/dim]",
-            ])
+            "\n".join(
+                [
+                    "[dim]Reduction[/dim]",
+                    f"[bold {health_color}]{snap.token_reduction_pct:.1f}%[/bold {health_color}]",
+                    f"[dim][{health_color}]{snap.token_health.upper()}[/{health_color}][/dim]",
+                ]
+            )
         )
 
     def _render_sparklines(self) -> None:
@@ -1560,7 +1560,9 @@ class StatusDashboardApp(App[None]):
 
         # Files indexed sparkline
         idx_spark = self.query_one("#indexed-sparkline", Sparkline)
-        idx_spark.data = snap.indexed_sparkline_data if snap.indexed_sparkline_data else [0]
+        idx_spark.data = (
+            snap.indexed_sparkline_data if snap.indexed_sparkline_data else [0]
+        )
 
         idx_ascii = _sparkline(snap.indexed_sparkline_data, unicode_ok=unicode_ok)
         delta_sign = "+" if snap.indexed_delta >= 0 else ""
@@ -1573,7 +1575,9 @@ class StatusDashboardApp(App[None]):
     def _render_status_cards(self) -> None:
         snap = self.snapshot
 
-        def _card(widget_id: str, title: str, level: str, label: str, detail: str = "") -> None:
+        def _card(
+            widget_id: str, title: str, level: str, label: str, detail: str = ""
+        ) -> None:
             icon = self._icon(level)
             color = _LEVEL_COLOR.get(level, "yellow")
             lines = [
@@ -1584,11 +1588,31 @@ class StatusDashboardApp(App[None]):
                 lines.append(f"[dim]{detail}[/dim]")
             self.query_one(f"#{widget_id}", Static).update("\n".join(lines))
 
-        _card("card-server",    "Server",    self._lc(snap.server_ok),    snap.server_label,    snap.server_detail)
-        _card("card-mcp",       "MCP",       self._lc(snap.mcp_ok),       snap.mcp_label)
-        _card("card-index",     "Index",     "ok" if "progress" in snap.index_label.lower() or snap.index_label == "Idle" else "warn",
-              snap.index_label, snap.index_detail)
-        _card("card-autostart", "Autostart", self._lc(snap.autostart_ok), snap.autostart_label)
+        _card(
+            "card-server",
+            "Server",
+            self._lc(snap.server_ok),
+            snap.server_label,
+            snap.server_detail,
+        )
+        _card("card-mcp", "MCP", self._lc(snap.mcp_ok), snap.mcp_label)
+        _card(
+            "card-index",
+            "Index",
+            (
+                "ok"
+                if "progress" in snap.index_label.lower() or snap.index_label == "Idle"
+                else "warn"
+            ),
+            snap.index_label,
+            snap.index_detail,
+        )
+        _card(
+            "card-autostart",
+            "Autostart",
+            self._lc(snap.autostart_ok),
+            snap.autostart_label,
+        )
 
     def _render_modality_table(self) -> None:
         snap = self.snapshot
@@ -1604,7 +1628,11 @@ class StatusDashboardApp(App[None]):
 
         for m in snap.modalities:
             display_count = "-" if m.count < 0 else f"{m.count:,}"
-            pct = f"{100 * m.count / total_files:.0f}%" if total_files > 0 and m.count > 0 else "-"
+            pct = (
+                f"{100 * m.count / total_files:.0f}%"
+                if total_files > 0 and m.count > 0
+                else "-"
+            )
             bar_val = 0 if m.count < 0 else m.count
             bar = _mini_bar(bar_val, max_count, width=14, unicode_ok=unicode_ok)
             icon = self._icon(m.level)
@@ -1623,40 +1651,46 @@ class StatusDashboardApp(App[None]):
 
         # Token health
         self.query_one("#token-detail", Static).update(
-            "\n".join([
-                f"Naive      [bold]{_fmt_tokens(snap.token_naive)}[/bold]  [dim](unoptimised)[/dim]",
-                f"Optimised  [bold cyan]{_fmt_tokens(snap.token_optimized)}[/bold cyan]",
-                f"Saved      [bold {health_color}]{_fmt_tokens(snap.total_tokens_saved)}[/bold {health_color}]",
-                f"Reduction  [bold {health_color}]{snap.token_reduction_pct:.1f}%[/bold {health_color}]  [{health_color}]({snap.token_health.upper()})[/{health_color}]",
-            ])
+            "\n".join(
+                [
+                    f"Naive      [bold]{_fmt_tokens(snap.token_naive)}[/bold]  [dim](unoptimised)[/dim]",
+                    f"Optimised  [bold cyan]{_fmt_tokens(snap.token_optimized)}[/bold cyan]",
+                    f"Saved      [bold {health_color}]{_fmt_tokens(snap.total_tokens_saved)}[/bold {health_color}]",
+                    f"Reduction  [bold {health_color}]{snap.token_reduction_pct:.1f}%[/bold {health_color}]  [{health_color}]({snap.token_health.upper()})[/{health_color}]",
+                ]
+            )
         )
 
         # Runtime
-        ff_level  = self._lc(snap.ffmpeg_ok)
-        cl_level  = self._lc(snap.clip_ok)
-        ff_icon   = self._icon(ff_level)
-        cl_icon   = self._icon(cl_level)
-        ff_color  = _LEVEL_COLOR.get(ff_level, "yellow")
-        cl_color  = _LEVEL_COLOR.get(cl_level, "yellow")
+        ff_level = self._lc(snap.ffmpeg_ok)
+        cl_level = self._lc(snap.clip_ok)
+        ff_icon = self._icon(ff_level)
+        cl_icon = self._icon(cl_level)
+        ff_color = _LEVEL_COLOR.get(ff_level, "yellow")
+        cl_color = _LEVEL_COLOR.get(cl_level, "yellow")
         self.query_one("#runtime-detail", Static).update(
-            "\n".join([
-                f"[{ff_color}]{ff_icon}  ffmpeg   {snap.ffmpeg_label}[/{ff_color}]",
-                f"[{cl_color}]{cl_icon}  CLIP     {snap.clip_label}[/{cl_color}]",
-            ])
+            "\n".join(
+                [
+                    f"[{ff_color}]{ff_icon}  ffmpeg   {snap.ffmpeg_label}[/{ff_color}]",
+                    f"[{cl_color}]{cl_icon}  CLIP     {snap.clip_label}[/{cl_color}]",
+                ]
+            )
         )
 
         # Config & autostart
-        cfg_level  = self._lc(snap.config_ok)
+        cfg_level = self._lc(snap.config_ok)
         auto_level = self._lc(snap.autostart_ok)
-        cfg_icon   = self._icon(cfg_level)
-        auto_icon  = self._icon(auto_level)
-        cfg_color  = _LEVEL_COLOR.get(cfg_level, "yellow")
+        cfg_icon = self._icon(cfg_level)
+        auto_icon = self._icon(auto_level)
+        cfg_color = _LEVEL_COLOR.get(cfg_level, "yellow")
         auto_color = _LEVEL_COLOR.get(auto_level, "yellow")
         self.query_one("#config-detail", Static).update(
-            "\n".join([
-                f"[{cfg_color}]{cfg_icon}  Config      {snap.config_label}[/{cfg_color}]",
-                f"[{auto_color}]{auto_icon}  Autostart   {snap.autostart_label}[/{auto_color}]",
-            ])
+            "\n".join(
+                [
+                    f"[{cfg_color}]{cfg_icon}  Config      {snap.config_label}[/{cfg_color}]",
+                    f"[{auto_color}]{auto_icon}  Autostart   {snap.autostart_label}[/{auto_color}]",
+                ]
+            )
         )
 
     def _render_top_search_table(self) -> None:
@@ -1671,7 +1705,9 @@ class StatusDashboardApp(App[None]):
             return
 
         for idx, item in enumerate(self.snapshot.top_searched_files, 1):
-            table.add_row(str(idx), _truncate_path(item.path, 70), f"{item.hit_count:,}")
+            table.add_row(
+                str(idx), _truncate_path(item.path, 70), f"{item.hit_count:,}"
+            )
 
     def _render_watch_table(self) -> None:
         table = self.query_one("#watch-table", DataTable)
@@ -1686,7 +1722,7 @@ class StatusDashboardApp(App[None]):
 
         for idx, item in enumerate(self.snapshot.watch_folders, 1):
             level = "ok" if item.exists else "critical"
-            icon  = self._icon(level)
+            icon = self._icon(level)
             color = _LEVEL_COLOR.get(level, "yellow")
             table.add_row(
                 str(idx),
@@ -1696,6 +1732,7 @@ class StatusDashboardApp(App[None]):
 
 
 # ─────────────────────────── CLI entry point ────────────────────────
+
 
 def run_status(port: int = DEFAULT_PORT) -> None:
     snapshot = _collect_status_snapshot(port=port)
@@ -1729,15 +1766,19 @@ def run_status(port: int = DEFAULT_PORT) -> None:
     )
     console.print()
 
-    tok_spark = _sparkline(snapshot.token_sparkline_data, unicode_ok=unicode_ok) or "N/A"
-    idx_spark = _sparkline(snapshot.indexed_sparkline_data, unicode_ok=unicode_ok) or "N/A"
+    tok_spark = (
+        _sparkline(snapshot.token_sparkline_data, unicode_ok=unicode_ok) or "N/A"
+    )
+    idx_spark = (
+        _sparkline(snapshot.indexed_sparkline_data, unicode_ok=unicode_ok) or "N/A"
+    )
 
     table = Table(title="[bold]SPARKLINE TRENDS (7-day)[/bold]")
     table.add_column("Metric", style="cyan")
     table.add_column("Value", style="green")
     table.add_column("Trend", style="yellow")
     table.add_row("Token Savings", f"{snapshot.total_tokens_saved:,} tokens", tok_spark)
-    table.add_row("Files Indexed", f"{snapshot.total_files_indexed:,} files",  idx_spark)
+    table.add_row("Files Indexed", f"{snapshot.total_files_indexed:,} files", idx_spark)
     console.print(table)
     console.print()
 

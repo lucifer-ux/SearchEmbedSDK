@@ -12,8 +12,14 @@ def _make_text_db(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(path)) as conn:
         conn.execute("CREATE TABLE files (category TEXT, content TEXT, mtime REAL)")
-        conn.execute("INSERT INTO files(category, content, mtime) VALUES ('text', 'hello world token payload', ?)", (now,))
-        conn.execute("INSERT INTO files(category, content, mtime) VALUES ('audio', 'audio transcript payload', ?)", (now - 86400,))
+        conn.execute(
+            "INSERT INTO files(category, content, mtime) VALUES ('text', 'hello world token payload', ?)",
+            (now,),
+        )
+        conn.execute(
+            "INSERT INTO files(category, content, mtime) VALUES ('audio', 'audio transcript payload', ?)",
+            (now - 86400,),
+        )
 
 
 def _make_image_db(path: Path) -> None:
@@ -36,16 +42,30 @@ def _make_code_db(path: Path) -> None:
     now = time.time()
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(path)) as conn:
-        conn.execute("CREATE TABLE project_files (line_count INTEGER, last_modified REAL)")
+        conn.execute(
+            "CREATE TABLE project_files (line_count INTEGER, last_modified REAL)"
+        )
         conn.execute("CREATE TABLE code_symbols (name TEXT)")
-        conn.execute("INSERT INTO project_files(line_count, last_modified) VALUES (120, ?)", (now,))
+        conn.execute(
+            "INSERT INTO project_files(line_count, last_modified) VALUES (120, ?)",
+            (now,),
+        )
         conn.execute("INSERT INTO code_symbols(name) VALUES ('main')")
 
 
 def test_collect_status_snapshot_builds_expected_metrics(tmp_path, monkeypatch):
-    text_db = tmp_path / "text_search_implementation_v2" / "storage" / "text_search_implementation_v2.db"
-    image_db = tmp_path / "image_search_implementation_v2" / "storage" / "images_meta.db"
-    video_db = tmp_path / "video_search_implementation_v2" / "storage" / "videos_meta.db"
+    text_db = (
+        tmp_path
+        / "text_search_implementation_v2"
+        / "storage"
+        / "text_search_implementation_v2.db"
+    )
+    image_db = (
+        tmp_path / "image_search_implementation_v2" / "storage" / "images_meta.db"
+    )
+    video_db = (
+        tmp_path / "video_search_implementation_v2" / "storage" / "videos_meta.db"
+    )
     code_db = tmp_path / "storage" / "code_index_layer1.db"
     _make_text_db(text_db)
     _make_image_db(image_db)
@@ -62,16 +82,42 @@ def test_collect_status_snapshot_builds_expected_metrics(tmp_path, monkeypatch):
     cfg.write_text("ui_theme: dark\n", encoding="utf-8")
 
     monkeypatch.setattr(status, "get_storage_dir", lambda: tmp_path)
-    monkeypatch.setattr(status, "get_watch_directories", lambda: [watch_existing, watch_missing])
+    monkeypatch.setattr(
+        status, "get_watch_directories", lambda: [watch_existing, watch_missing]
+    )
     monkeypatch.setattr(status, "get_enable_code", lambda: True)
-    monkeypatch.setattr(status, "video_runtime_status", lambda: {"ffmpeg_ready": True, "clip_ready": True, "ffmpeg_path": "C:/ffmpeg/bin/ffmpeg.exe"})
-    monkeypatch.setattr(status, "autostart_status", lambda: {"installed": True, "target": "Task Scheduler"})
+    monkeypatch.setattr(
+        status,
+        "video_runtime_status",
+        lambda: {
+            "ffmpeg_ready": True,
+            "clip_ready": True,
+            "ffmpeg_path": "C:/ffmpeg/bin/ffmpeg.exe",
+        },
+    )
+    monkeypatch.setattr(
+        status,
+        "autostart_status",
+        lambda: {"installed": True, "target": "Task Scheduler"},
+    )
     monkeypatch.setattr(status, "index_lock_active", lambda: (False, {}))
-    monkeypatch.setattr(status, "read_index_state", lambda: {"started_at": "2026-04-17T10:00:00", "result": "success", "completed_at": "2026-04-17T10:05:00"})
+    monkeypatch.setattr(
+        status,
+        "read_index_state",
+        lambda: {
+            "started_at": "2026-04-17T10:00:00",
+            "result": "success",
+            "completed_at": "2026-04-17T10:05:00",
+        },
+    )
     monkeypatch.setattr(status, "get_port_usage", lambda _port: {"in_use": False})
     monkeypatch.setattr(status, "get_sdk_root", lambda: tmp_path)
     monkeypatch.setattr(status, "_config_path", lambda: cfg)
-    monkeypatch.setattr(status, "top_searched_files", lambda limit=3: [("C:/docs/a.txt", 7), ("C:/docs/b.txt", 3)][:limit])
+    monkeypatch.setattr(
+        status,
+        "top_searched_files",
+        lambda limit=3: [("C:/docs/a.txt", 7), ("C:/docs/b.txt", 3)][:limit],
+    )
 
     (tmp_path / "mcp_server.py").write_text("# ok\n", encoding="utf-8")
 
@@ -113,4 +159,3 @@ def test_watch_path_truncation():
     truncated = status._truncate_path(value, width=24)
     assert len(truncated) <= 24
     assert truncated.endswith("...")
-
