@@ -1,8 +1,15 @@
 # unimain.py
-import os, time, asyncio, threading, sqlite3, traceback, queue
-import subprocess, gc, hashlib, base64
-import socket
+import os
 import time
+import asyncio
+import threading
+import sqlite3
+import traceback
+import queue
+import subprocess
+import gc
+import hashlib
+import base64
 import shutil
 import sys
 import platform
@@ -23,7 +30,8 @@ import requests
 from fastapi import FastAPI, Query, HTTPException, Body
 from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse
-from activity.recent_sync import get_recent_syncs, record_sync
+from activity.recent_sync import get_recent_syncs
+from activity.search_analytics import record_search_hits
 from index_controller.thumbnail_manager import read_thumbnail
 from index_controller.ignore import should_ignore
 from fastapi import Request
@@ -373,7 +381,7 @@ class ResourceManager:
         }
         if platform.system() == "Windows":
              kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
-             
+
         self._llm_proc  = subprocess.Popen(cmd, **kwargs)
         self._llm_ready = False
         print(f"   PID {self._llm_proc.pid} — waiting for /health …")
@@ -768,7 +776,7 @@ def scan_image_index(target_dir: str | Path | None = None):
 def scan_video_index_wrapper(target_dir: str | None = None):
     try:
         combined = {"status": "ok", "new_vectors": 0}
-        
+
         if target_dir:
             p = Path(target_dir).expanduser().resolve()
             if not p.is_dir():
@@ -776,7 +784,7 @@ def scan_video_index_wrapper(target_dir: str | None = None):
             dirs = [p]
         else:
             dirs = get_video_directories()
-            
+
         for vdir in dirs:
             if not vdir.is_dir():
                 continue
@@ -806,11 +814,11 @@ def scan_audio_index_wrapper(target_dir: str | None = None):
         else:
             audio_dirs = get_audio_directories()
             env["CONTEXTCORE_AUDIO_DIR"] = str(audio_dirs[0]) if audio_dirs else "."
-            
+
         kwargs = {"env": env}
         if platform.system() == "Windows":
              kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
-             
+
         subprocess.Popen([sys.executable, "-m", "audio_search_implementation_v2.worker"], **kwargs)
         return {"status": "accepted"}
     except Exception as e:
@@ -884,7 +892,7 @@ def _delete_image_file(path: str) -> bool:
         if row:
             image_id = int(row["id"])
             annoy_id = row["annoy_id"]
-            
+
             # Delete FTS entries
             conn.execute("DELETE FROM images_fts WHERE rowid = ?", (image_id,))
             # Delete embeddings
@@ -983,7 +991,7 @@ def _delete_code_file(path: str) -> bool:
 def cleanup_stale_entries() -> dict[str, int]:
     """Remove database entries for files that no longer exist on disk."""
     results = {"text_removed": 0, "image_removed": 0, "video_removed": 0, "audio_removed": 0, "code_removed": 0}
-    
+
     # Clean up text files
     try:
         from text_search_implementation_v2.db import get_conn as text_get_conn
@@ -997,7 +1005,7 @@ def cleanup_stale_entries() -> dict[str, int]:
         conn.close()
     except Exception as e:
         print(f"⚠️ Error cleaning up text entries: {e}")
-    
+
     # Clean up image files
     try:
         from image_search_implementation_v2.db import get_conn as img_get_conn
@@ -1011,7 +1019,7 @@ def cleanup_stale_entries() -> dict[str, int]:
         conn.close()
     except Exception as e:
         print(f"⚠️ Error cleaning up image entries: {e}")
-    
+
     # Clean up video files
     try:
         from video_search_implementation_v2.video_index import _get_conn as video_get_conn
@@ -1025,7 +1033,7 @@ def cleanup_stale_entries() -> dict[str, int]:
         conn.close()
     except Exception as e:
         print(f"⚠️ Error cleaning up video entries: {e}")
-    
+
     # Clean up code files
     try:
         conn = _code_db_conn()
@@ -1038,13 +1046,13 @@ def cleanup_stale_entries() -> dict[str, int]:
         conn.close()
     except Exception as e:
         print(f"⚠️ Error cleaning up code entries: {e}")
-    
+
     total_removed = sum(results.values())
     print(f"🧹 Cleanup completed: removed {total_removed} stale entries")
     for modality, count in results.items():
         if count > 0:
             print(f"  {modality}: {count}")
-    
+
     return results
 
 
@@ -1053,10 +1061,10 @@ def _route_watch_delete_event(src_path: str) -> None:
     path = Path(src_path)
     suffix = path.suffix.lower()
     enabled = _watcher_enabled_modalities()
-    
+
     print(f"🗑️  Routing deletion for {src_path}, suffix: {suffix}")
     print(f"🗑️  Enabled modalities: {enabled}")
-    
+
     # Text files
     if enabled["text"] and suffix in TEXT_WATCH_EXTS:
         print(f"🗑️  Deleting as text file: {src_path}")
@@ -1077,7 +1085,7 @@ def _route_watch_delete_event(src_path: str) -> None:
     if enabled["code"] and (path.name in CODE_SPECIAL_FILENAMES or suffix in CODE_WATCH_EXTS):
         print(f"🗑️  Deleting as code file: {src_path}")
         _delete_code_file(src_path)
-    
+
     print(f"🗑️  Deletion routing complete for {src_path}")
 
 
@@ -3021,20 +3029,20 @@ def run_video_search(query: str, top_k: int = 10):
 def run_audio_search(query: str, top_k: int = 10):
     try:
         from text_search_implementation_v2.db import query_fts, get_file_metadata_by_ids, get_fts_content_by_ids
-        
+
         tokens = query.strip().lower().split()
         if tokens:
             match_q = " OR ".join(t + "*" for t in tokens)
             rows = query_fts(match_q, limit=top_k * 2)
         else:
             rows = []
-        
+
         audio_results = []
         for r in rows:
             meta = get_file_metadata_by_ids([r["id"]]).get(r["id"])
             if not meta or meta.get("category") != "audio":
                 continue
-            
+
             content = get_fts_content_by_ids([r["id"]]).get(r["id"], "")
             audio_results.append({
                 "path": meta["path"],
@@ -3045,7 +3053,7 @@ def run_audio_search(query: str, top_k: int = 10):
             })
             if len(audio_results) >= top_k:
                 break
-        
+
         return {"hits": audio_results}
     except Exception as e:
         traceback.print_exc()
@@ -3073,7 +3081,7 @@ async def startup():
             print("⚠️ text prewarm failed:", e)
         if get_enable_image() or get_enable_video():
             if importlib.util.find_spec("transformers") is None:
-                print(f"⚠️ CLIP prewarm skipped: transformers not installed")
+                print("⚠️ CLIP prewarm skipped: transformers not installed")
                 print(f"   Install with: {sys.executable} -m pip install --no-cache-dir torch torchvision transformers")
             else:
                 try:
@@ -3133,7 +3141,7 @@ async def run_llm(
     """
     if not query.strip():
         raise HTTPException(400, "Empty query")
-    
+
     current_temp = get_cpu_temp_c()
     if current_temp >= THERMAL_LIMIT_C:
         raise HTTPException(
@@ -3146,7 +3154,7 @@ async def run_llm(
             },
             headers={"Retry-After": "30"},
         )
-        
+
     async with rm.llm_context():
         payload = {
             "prompt":      query,
@@ -3272,6 +3280,22 @@ async def unified_search(
                     if isinstance(video_res, dict) and "hits" in video_res
                     else {"count": 0, "results": [],
                           "error": video_res.get("error") if isinstance(video_res, dict) else None})
+
+    hit_paths: list[str] = []
+    for section in ("text", "audio", "image", "video"):
+        items = out.get(section, {}).get("results", [])
+        if not isinstance(items, list):
+            continue
+        for row in items:
+            if not isinstance(row, dict):
+                continue
+            candidate = row.get("path") or row.get("video_path") or row.get("source")
+            if isinstance(candidate, str) and candidate.strip():
+                hit_paths.append(candidate.strip())
+    try:
+        record_search_hits(hit_paths)
+    except Exception:
+        pass
     return out
 
 
@@ -3311,7 +3335,7 @@ async def index_scan(
             raise HTTPException(404, "code_path directory not found")
         if not _is_path_allowed(code_root):
             raise HTTPException(403, "code_path not allowed")
-            
+
     if target_dir:
         t_root = Path(target_dir).expanduser().resolve()
         if not t_root.exists() or not t_root.is_dir():
@@ -3371,14 +3395,14 @@ async def index_scan(
             loop = asyncio.get_event_loop()
             pool = ThreadPoolExecutor(max_workers=SCAN_THREADPOOL)
             jobs = []
-            
+
             # Always call scan helpers directly — they handle target_dir=None as "use config"
             if run_text:  jobs.append(("text",  loop.run_in_executor(pool, scan_text_index,          target_dir)))
             if run_image: jobs.append(("image", loop.run_in_executor(pool, scan_image_index,         target_dir)))
             if run_video: jobs.append(("video", loop.run_in_executor(pool, scan_video_index_wrapper, target_dir)))
             if run_audio: jobs.append(("audio", loop.run_in_executor(pool, scan_audio_index_wrapper, target_dir)))
             if run_code:  jobs.append(("code",  loop.run_in_executor(pool, lambda: scan_code_index_wrapper(code_path))))
-                
+
             for name, fut in jobs:
                 try:
                     print(f"scan [{name}]:", await fut)
@@ -4699,7 +4723,7 @@ def storage_usage():
         "used_percent": round(used / total * 100, 2) if total else 0.0,
     }
 
-# middleware protection definition 
+# middleware protection definition
 
 @app.middleware("http")
 async def network_guard(request: Request, call_next):
@@ -4879,20 +4903,6 @@ def get_current_wifi():
     except Exception:
         return None
 
-def start_hotspot():
-    print("🔥 Starting hotspot mode...")
-    subprocess.run([
-        "nmcli", "device", "wifi", "hotspot",
-        "ssid", HOTSPOT_NAME,
-        "password", HOTSPOT_PASSWORD
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    NETWORK_STATE["hotspot_active"] = True
-    NETWORK_STATE["connected"] = False
-    NETWORK_STATE["ssid"] = None
-    NETWORK_STATE["hotspot_active"] = True
-
-
 def stop_hotspot():
     subprocess.run(["nmcli", "connection", "down", HOTSPOT_NAME],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -4992,7 +5002,7 @@ def network_bootstrap():
 
         NETWORK_STATE["connected"] = False
         NETWORK_STATE["ssid"] = None
-        
+
         stop_system_dnsmasq()
         start_hotspot()
 

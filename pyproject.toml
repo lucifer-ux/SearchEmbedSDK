@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "contextcore"
-version = "1.0.0"
+version = "1.1.0"
 description = "Unified local search and indexing for Claude and other AI tools"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -30,8 +30,8 @@ dependencies = [
     "pypdf",
     "typer",
     "rich",
-    "questionary",
     "textual",
+    "questionary",
     "watchdog",
     "requests",
     "numpy",
@@ -50,7 +50,8 @@ all    = ["torch", "torchvision", "transformers", "faster-whisper"]
 dev = [
     "pytest",
     "pytest-timeout",
-    "flake8",
+    "ruff",
+    "black",
     "build",
     "twine",
 ]
@@ -96,3 +97,19 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 filterwarnings = ["ignore::pytest.PytestConfigWarning"]
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 88
+fix = true
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]  # Let Black handle line length
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
