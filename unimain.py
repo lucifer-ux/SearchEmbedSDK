@@ -35,7 +35,7 @@ from activity.search_analytics import record_search_hits
 from index_controller.thumbnail_manager import read_thumbnail
 from index_controller.ignore import should_ignore
 from fastapi import Request
-from rclone_service import *
+from rclone_service import RCLONE_URL, check_remote, get_job_status, start_copy
 from auth_manager import start_auth, auth_sessions
 from config import (
     get_video_directories,
@@ -51,9 +51,15 @@ from config import (
     get_enable_code,
     get_storage_dir,
 )
-from cli.lifecycle import acquire_index_lock, index_lock_active, release_index_lock, update_index_state
+from cli.lifecycle import (
+    acquire_index_lock,
+    index_lock_active,
+    release_index_lock,
+    update_index_state,
+)
 
 _orig_print = builtins.print
+
 
 def print(*args, **kwargs):
     try:
@@ -64,9 +70,9 @@ def print(*args, **kwargs):
 
 
 # ── Paths & tunables ─────────────────────────────────────────
-ROOT            = Path(__file__).parent.resolve()
-ORGANIZED_ROOT  = get_organized_root()
-IMAGE_DIR       = get_image_directory()
+ROOT = Path(__file__).parent.resolve()
+ORGANIZED_ROOT = get_organized_root()
+IMAGE_DIR = get_image_directory()
 
 WIFI_INTERFACE = "wlan0"
 HOTSPOT_NAME = "RadxaAP"
@@ -74,51 +80,44 @@ HOTSPOT_SSID = "RadxaSetup"
 HOTSPOT_PASSWORD = "radxa1234"
 HOTSPOT_IP = "10.99.0.1/24"
 
-STORAGE_DIR      = get_storage_dir()
-IMAGE_INDEX_DIR  = STORAGE_DIR / "image_search_implementation_v2" / "storage"
+STORAGE_DIR = get_storage_dir()
+IMAGE_INDEX_DIR = STORAGE_DIR / "image_search_implementation_v2" / "storage"
 IMAGE_INDEX_DIR.mkdir(parents=True, exist_ok=True)
-IMAGE_META_DB    = IMAGE_INDEX_DIR / "images_meta.db"
-IMAGE_EMBED_DIR  = IMAGE_INDEX_DIR / "embeddings"
+IMAGE_META_DB = IMAGE_INDEX_DIR / "images_meta.db"
+IMAGE_EMBED_DIR = IMAGE_INDEX_DIR / "embeddings"
 IMAGE_EMBED_DIR.mkdir(parents=True, exist_ok=True)
 ANNOY_INDEX_PATH = IMAGE_INDEX_DIR / "annoy_index.ann"
 
-ANNOY_DIM    = 512
+ANNOY_DIM = 512
 ANNOY_N_TREES = 10
 IMAGE_REBUILD_LOCK = threading.Lock()
 IMAGE_EMBED_BATCH_REBUILD_THRESHOLD = 8
 SEARCH_THREADPOOL = 2
-SCAN_THREADPOOL   = 2
+SCAN_THREADPOOL = 2
 
 # llama-server — same build dir as llama-cli
-LLAMA_SERVER_BIN  = ROOT / "llama.cpp" / "build" / "bin" / "llama-server"
-LLAMA_MODEL       = ROOT / "llama.cpp" / "models" / "rocket-3B" / "rocket-3b.Q4_K_M.gguf"
+LLAMA_SERVER_BIN = ROOT / "llama.cpp" / "build" / "bin" / "llama-server"
+LLAMA_MODEL = ROOT / "llama.cpp" / "models" / "rocket-3B" / "rocket-3b.Q4_K_M.gguf"
 LLAMA_SERVER_HOST = "127.0.0.1"
-LLAMA_SERVER_PORT = 8765          # internal only, not exposed
-LLAMA_SERVER_URL  = f"http://{LLAMA_SERVER_HOST}:{LLAMA_SERVER_PORT}"
-LLAMA_CTX         = 1024
-LLAMA_THREADS     = 4
+LLAMA_SERVER_PORT = 8765  # internal only, not exposed
+LLAMA_SERVER_URL = f"http://{LLAMA_SERVER_HOST}:{LLAMA_SERVER_PORT}"
+LLAMA_CTX = 1024
+LLAMA_THREADS = 4
 
 # Queued requests wait up to this long before getting a 503
-QUEUE_WAIT_TIMEOUT = 60   # seconds
+QUEUE_WAIT_TIMEOUT = 60  # seconds
 THERMAL_LIMIT_C = 80  # °C — reject LLM calls above this
 
-NETWORK_STATE = {
-    "connected": False,
-    "ssid": None,
-    "hotspot_active": False
-}
-NETWORK_CONTROL_SUPPORTED = (
-    os.name == "posix" and shutil.which("nmcli") is not None
-)
+NETWORK_STATE = {"connected": False, "ssid": None, "hotspot_active": False}
+NETWORK_CONTROL_SUPPORTED = os.name == "posix" and shutil.which("nmcli") is not None
 
 # File access policy:
 # - default allows arbitrary local file serving/listing for desktop/dev workflows
 # - can be restricted by setting CONTEXTCORE_ALLOW_ARBITRARY_FILE_ACCESS=0 and
 #   CONTEXTCORE_FILE_ROOTS to a ';'-separated allowlist.
-ALLOW_ARBITRARY_FILE_ACCESS = (
-    os.getenv("CONTEXTCORE_ALLOW_ARBITRARY_FILE_ACCESS", "1").strip().lower()
-    not in {"0", "false", "no"}
-)
+ALLOW_ARBITRARY_FILE_ACCESS = os.getenv(
+    "CONTEXTCORE_ALLOW_ARBITRARY_FILE_ACCESS", "1"
+).strip().lower() not in {"0", "false", "no"}
 FILE_ROOTS = [
     Path(p).expanduser().resolve()
     for p in os.getenv("CONTEXTCORE_FILE_ROOTS", "").split(";")
@@ -197,10 +196,26 @@ EXCLUDES_BY_PROJECT_TYPE: dict[str, set[str]] = {
     "c_cpp": {"build", "out"},
 }
 DEPENDENCY_DIR_NAMES = {
-    "node_modules", "vendor", ".venv", "venv", ".pnpm-store", ".yarn", ".npm", ".cargo"
+    "node_modules",
+    "vendor",
+    ".venv",
+    "venv",
+    ".pnpm-store",
+    ".yarn",
+    ".npm",
+    ".cargo",
 }
 GENERATED_DIR_NAMES = {
-    "dist", "build", "out", "target", "coverage", ".cache", ".parcel-cache", ".next", ".nuxt", ".svelte-kit"
+    "dist",
+    "build",
+    "out",
+    "target",
+    "coverage",
+    ".cache",
+    ".parcel-cache",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
 }
 
 CODE_INDEX_DB = STORAGE_DIR / "storage" / "code_index_layer1.db"
@@ -210,20 +225,79 @@ CODE_CHUNK_LINES = 80
 CODE_CHUNK_OVERLAP = 20
 CODE_INDEX_MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024
 CODE_TEXT_EXTENSIONS = {
-    ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
-    ".rs", ".go", ".java", ".kt", ".kts", ".scala", ".swift",
-    ".rb", ".php", ".cs", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp",
-    ".sql", ".sh", ".bash", ".zsh", ".ps1", ".toml", ".yaml", ".yml",
-    ".json", ".xml", ".ini", ".cfg", ".conf", ".env",
-    ".md", ".txt",
+    ".py",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".mjs",
+    ".cjs",
+    ".rs",
+    ".go",
+    ".java",
+    ".kt",
+    ".kts",
+    ".scala",
+    ".swift",
+    ".rb",
+    ".php",
+    ".cs",
+    ".cpp",
+    ".cc",
+    ".cxx",
+    ".c",
+    ".h",
+    ".hpp",
+    ".sql",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".ps1",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".json",
+    ".xml",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".env",
+    ".md",
+    ".txt",
 }
 CODE_SPECIAL_FILENAMES = {
-    "Dockerfile", "Makefile", "CMakeLists.txt", "Jenkinsfile", "Procfile",
+    "Dockerfile",
+    "Makefile",
+    "CMakeLists.txt",
+    "Jenkinsfile",
+    "Procfile",
 }
 TEXT_WATCH_EXTS = {
-    ".txt", ".md", ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".csv",
-    ".xlsx", ".xls", ".json", ".xml", ".yaml", ".yml", ".toml", ".ini",
-    ".cfg", ".conf", ".log", ".html", ".htm", ".rst", ".tsv", ".rtf", ".ods",
+    ".txt",
+    ".md",
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".ppt",
+    ".pptx",
+    ".csv",
+    ".xlsx",
+    ".xls",
+    ".json",
+    ".xml",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".log",
+    ".html",
+    ".htm",
+    ".rst",
+    ".tsv",
+    ".rtf",
+    ".ods",
 }
 IMAGE_WATCH_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff"}
 AUDIO_WATCH_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
@@ -240,15 +314,18 @@ _watch_last_job: dict[tuple[str, str], float] = {}
 # Watcher logging
 _WATCHER_LOG_PATH = get_storage_dir() / "watcher.log"
 
+
 def _watcher_log(msg: str) -> None:
     """Log watcher events to file for debugging."""
     from datetime import datetime
+
     timestamp = datetime.now().isoformat()
     try:
         with open(_WATCHER_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] {msg}\n")
     except Exception:
         pass  # Fail silently if logging fails
+
 
 # NOTE: No idle-unload — whichever family is loaded stays loaded
 #       until the OTHER family is explicitly requested.
@@ -269,8 +346,8 @@ def _watcher_log(msg: str) -> None:
 #    • No watchdog / idle timer — models stay loaded indefinitely.
 # ═══════════════════════════════════════════════════════════════
 class ResourceManager:
-    STATE_IDLE  = "idle"
-    STATE_LLM   = "llm"
+    STATE_IDLE = "idle"
+    STATE_LLM = "llm"
     STATE_EMBED = "embed"
 
     def __init__(self):
@@ -278,10 +355,10 @@ class ResourceManager:
         # Once activated, the lock is released so the same-family
         # requests can stack without re-triggering a model switch.
         self._switch_lock = asyncio.Lock()
-        self._state       = self.STATE_IDLE
+        self._state = self.STATE_IDLE
 
         self._llm_proc: Optional[subprocess.Popen] = None
-        self._llm_ready  = False
+        self._llm_ready = False
 
     # ── context managers used by endpoint handlers ─────────────
 
@@ -314,7 +391,7 @@ class ResourceManager:
             finally:
                 self._switch_lock.release()
 
-        yield   # llama-server is up; caller does its work
+        yield  # llama-server is up; caller does its work
 
     @asynccontextmanager
     async def embed_context(self):
@@ -341,7 +418,7 @@ class ResourceManager:
             finally:
                 self._switch_lock.release()
 
-        yield   # embed models ready; caller does its work
+        yield  # embed models ready; caller does its work
 
     # ── internal activation (runs in thread executor) ──────────
 
@@ -367,22 +444,28 @@ class ResourceManager:
         print("🚀 Starting llama-server …")
         cmd = [
             str(LLAMA_SERVER_BIN),
-            "--model",     str(LLAMA_MODEL),
-            "--host",      LLAMA_SERVER_HOST,
-            "--port",      str(LLAMA_SERVER_PORT),
-            "--ctx-size",  str(LLAMA_CTX),
-            "--threads",   str(LLAMA_THREADS),
-            "--n-predict", "256",
-            "--no-mmap",   # avoids page-cache fights on 8 GB RAM
+            "--model",
+            str(LLAMA_MODEL),
+            "--host",
+            LLAMA_SERVER_HOST,
+            "--port",
+            str(LLAMA_SERVER_PORT),
+            "--ctx-size",
+            str(LLAMA_CTX),
+            "--threads",
+            str(LLAMA_THREADS),
+            "--n-predict",
+            "256",
+            "--no-mmap",  # avoids page-cache fights on 8 GB RAM
         ]
         kwargs = {
             "stdout": subprocess.DEVNULL,
             "stderr": subprocess.DEVNULL,
         }
         if platform.system() == "Windows":
-             kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+            kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
 
-        self._llm_proc  = subprocess.Popen(cmd, **kwargs)
+        self._llm_proc = subprocess.Popen(cmd, **kwargs)
         self._llm_ready = False
         print(f"   PID {self._llm_proc.pid} — waiting for /health …")
         self._wait_for_ready()
@@ -424,19 +507,19 @@ class ResourceManager:
                 self._llm_proc.kill()
             except Exception:
                 pass
-        self._llm_proc  = None
+        self._llm_proc = None
         self._llm_ready = False
         gc.collect()
         print("   llama-server stopped")
 
 
 # ── Embed model globals ───────────────────────────────────────
-_clip_model       = None
-_clip_processor   = None
-_annoy_index      = None
-_annoy_loaded     = False
+_clip_model = None
+_clip_processor = None
+_annoy_index = None
+_annoy_loaded = False
 _annoy_needs_rebuild = False
-_text_engine      = None
+_text_engine = None
 _code_chunk_annoy_index = None
 _code_chunk_annoy_loaded = False
 _code_chunk_annoy_lock = threading.Lock()
@@ -451,11 +534,11 @@ def _unload_embed_models():
             _annoy_index.unload()
         except Exception:
             pass
-    _annoy_index    = None
-    _annoy_loaded   = False
-    _clip_model     = None
+    _annoy_index = None
+    _annoy_loaded = False
+    _clip_model = None
     _clip_processor = None
-    _text_engine    = None
+    _text_engine = None
     _code_chunk_annoy_index = None
     _code_chunk_annoy_loaded = False
     gc.collect()
@@ -478,6 +561,7 @@ def lazy_load_clip():
         import os
         from transformers import CLIPProcessor, CLIPModel
         import torch
+
         prev_hf_offline = os.environ.get("HF_HUB_OFFLINE")
         prev_tf_offline = os.environ.get("TRANSFORMERS_OFFLINE")
         try:
@@ -526,8 +610,11 @@ def lazy_load_clip():
 def embed_text_with_clip(text: str):
     model, processor = lazy_load_clip()
     import torch
-    inputs = {k: v.to("cpu") for k, v in
-              processor(text=[text], return_tensors="pt", padding=True).items()}
+
+    inputs = {
+        k: v.to("cpu")
+        for k, v in processor(text=[text], return_tensors="pt", padding=True).items()
+    }
     with torch.no_grad():
         feats = model.get_text_features(**inputs)
         # Some transformer/CLIP variants may return model output objects.
@@ -536,19 +623,31 @@ def embed_text_with_clip(text: str):
                 feats = feats.text_embeds
             elif hasattr(feats, "pooler_output") and feats.pooler_output is not None:
                 feats = feats.pooler_output
-            elif hasattr(feats, "last_hidden_state") and feats.last_hidden_state is not None:
+            elif (
+                hasattr(feats, "last_hidden_state")
+                and feats.last_hidden_state is not None
+            ):
                 feats = feats.last_hidden_state[:, 0, :]
             else:
                 raise RuntimeError("Unsupported CLIP text feature output type")
-    return (feats / feats.norm(dim=-1, keepdim=True)).squeeze(0).cpu().numpy().astype("float32")
+    return (
+        (feats / feats.norm(dim=-1, keepdim=True))
+        .squeeze(0)
+        .cpu()
+        .numpy()
+        .astype("float32")
+    )
 
 
 def embed_image_file(image_path: Path):
     model, processor = lazy_load_clip()
     from PIL import Image
     import torch
+
     img = Image.open(image_path).convert("RGB")
-    inputs = {k: v.to("cpu") for k, v in processor(images=img, return_tensors="pt").items()}
+    inputs = {
+        k: v.to("cpu") for k, v in processor(images=img, return_tensors="pt").items()
+    }
     with torch.no_grad():
         feats = model.get_image_features(**inputs)
         if not isinstance(feats, torch.Tensor):
@@ -556,17 +655,26 @@ def embed_image_file(image_path: Path):
                 feats = feats.image_embeds
             elif hasattr(feats, "pooler_output") and feats.pooler_output is not None:
                 feats = feats.pooler_output
-            elif hasattr(feats, "last_hidden_state") and feats.last_hidden_state is not None:
+            elif (
+                hasattr(feats, "last_hidden_state")
+                and feats.last_hidden_state is not None
+            ):
                 feats = feats.last_hidden_state[:, 0, :]
             else:
                 raise RuntimeError("Unsupported CLIP image feature output type")
-    return (feats / feats.norm(dim=-1, keepdim=True)).squeeze(0).cpu().numpy().astype("float32")
+    return (
+        (feats / feats.norm(dim=-1, keepdim=True))
+        .squeeze(0)
+        .cpu()
+        .numpy()
+        .astype("float32")
+    )
 
 
 def get_video_module():
     return __import__(
         "video_search_implementation_v2.video_index",
-        fromlist=["scan_video_index", "search_videos"]
+        fromlist=["scan_video_index", "search_videos"],
     )
 
 
@@ -577,6 +685,7 @@ def ensure_annoy_loaded():
         return True
     try:
         from annoy import AnnoyIndex
+
         if not ANNOY_INDEX_PATH.exists():
             _annoy_index = AnnoyIndex(ANNOY_DIM, "angular")
         else:
@@ -593,10 +702,11 @@ def ensure_annoy_loaded():
 def rebuild_annoy_index(iter_fn):
     global _annoy_index, _annoy_loaded, _annoy_needs_rebuild
     from annoy import AnnoyIndex
+
     with IMAGE_REBUILD_LOCK:
         print("🔧 Rebuilding Annoy index …")
         ai = AnnoyIndex(ANNOY_DIM, "angular")
-        i  = 0
+        i = 0
         for _id, vec in iter_fn():
             ai.add_item(_id, vec)
             i += 1
@@ -606,7 +716,7 @@ def rebuild_annoy_index(iter_fn):
             ai.build(ANNOY_N_TREES)
             ai.save(str(ANNOY_INDEX_PATH))
             _annoy_index = ai
-        _annoy_loaded        = True
+        _annoy_loaded = True
         _annoy_needs_rebuild = False
         print(f"🔧 Annoy rebuilt: {i} items")
 
@@ -618,6 +728,7 @@ def all_vectors_iterator():
             continue
         try:
             import numpy as np
+
             yield int(aid), np.load(str(IMAGE_EMBED_DIR / f"{aid}.npy"))
         except Exception:
             continue
@@ -654,25 +765,30 @@ def get_known_images():
     conn = _get_image_conn()
     rows = conn.execute("SELECT id, path, mtime, annoy_id FROM images").fetchall()
     conn.close()
-    return {r["path"]: {"id": r["id"], "mtime": r["mtime"], "annoy_id": r["annoy_id"]}
-            for r in rows}
+    return {
+        r["path"]: {"id": r["id"], "mtime": r["mtime"], "annoy_id": r["annoy_id"]}
+        for r in rows
+    }
 
 
 def add_or_update_image(path: str, mtime: float, annoy_id: Optional[int]):
     from pathlib import Path
+
     filename = Path(path).name
     conn = _get_image_conn()
-    conn.execute("""INSERT INTO images (path, filename, mtime, annoy_id) VALUES (?, ?, ?, ?)
+    conn.execute(
+        """INSERT INTO images (path, filename, mtime, annoy_id) VALUES (?, ?, ?, ?)
         ON CONFLICT(path) DO UPDATE
         SET filename=excluded.filename, mtime=excluded.mtime, annoy_id=excluded.annoy_id""",
-        (path, filename, mtime, annoy_id))
+        (path, filename, mtime, annoy_id),
+    )
     conn.commit()
     conn.close()
 
 
 def get_next_annoy_id():
     conn = _get_image_conn()
-    row  = conn.execute("SELECT MAX(annoy_id) as mx FROM images").fetchone()
+    row = conn.execute("SELECT MAX(annoy_id) as mx FROM images").fetchone()
     conn.close()
     return int(row[0] or 0) + 1
 
@@ -683,7 +799,11 @@ def scan_text_index(target_dir: str | None = None):
         mod = __import__(
             "text_search_implementation_v2.index_worker", fromlist=["run_scan"]
         )
-        scan_dirs = [Path(target_dir).expanduser().resolve()] if target_dir else get_watch_directories()
+        scan_dirs = (
+            [Path(target_dir).expanduser().resolve()]
+            if target_dir
+            else get_watch_directories()
+        )
         if hasattr(mod, "run_scan"):
             for scan_dir in scan_dirs:
                 mod.run_scan(target_dir=str(scan_dir))
@@ -724,7 +844,11 @@ def scan_image_index(target_dir: str | Path | None = None):
 
     try:
         from image_search_implementation_v2.db import get_conn, init_db
-        from image_search_implementation_v2.index_worker import IMAGE_EXTS, finalize_indexing, index_file
+        from image_search_implementation_v2.index_worker import (
+            IMAGE_EXTS,
+            finalize_indexing,
+            index_file,
+        )
     except Exception as e:
         return {
             "status": "error",
@@ -737,7 +861,11 @@ def scan_image_index(target_dir: str | Path | None = None):
     before_count = int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0])
     conn.close()
 
-    scan_roots = [Path(target_dir).expanduser().resolve()] if target_dir else get_watch_directories()
+    scan_roots = (
+        [Path(target_dir).expanduser().resolve()]
+        if target_dir
+        else get_watch_directories()
+    )
     scanned = 0
     failed = 0
     skip_dirs = {".venv", "venv", "__pycache__", "node_modules", ".git", ".hg", ".svn"}
@@ -799,6 +927,7 @@ def scan_video_index_wrapper(target_dir: str | None = None):
 def scan_audio_index_wrapper(target_dir: str | None = None):
     try:
         import sys
+
         if importlib.util.find_spec("faster_whisper") is None:
             return {
                 "status": "skipped",
@@ -817,9 +946,11 @@ def scan_audio_index_wrapper(target_dir: str | None = None):
 
         kwargs = {"env": env}
         if platform.system() == "Windows":
-             kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+            kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
 
-        subprocess.Popen([sys.executable, "-m", "audio_search_implementation_v2.worker"], **kwargs)
+        subprocess.Popen(
+            [sys.executable, "-m", "audio_search_implementation_v2.worker"], **kwargs
+        )
         return {"status": "accepted"}
     except Exception as e:
         traceback.print_exc()
@@ -850,20 +981,32 @@ def _enqueue_watch_job(modality: str, target_dir: Path) -> None:
 def _delete_text_file(path: str) -> bool:
     """Delete text file entry and its full-text search index."""
     try:
-        from text_search_implementation_v2.db import delete_file_by_path_category, get_conn, _table_exists
+        from text_search_implementation_v2.db import (
+            delete_file_by_path_category,
+            get_conn,
+            _table_exists,
+        )
+
         # Try common categories
         for category in [None, "text", "code_comment", "transcript"]:
             try:
                 if category is None:
                     # Try by path without category filter
                     conn = get_conn()
-                    row = conn.execute("SELECT id FROM files WHERE path = ?", (path,)).fetchone()
+                    row = conn.execute(
+                        "SELECT id FROM files WHERE path = ?", (path,)
+                    ).fetchone()
                     if row:
                         file_id = row["id"]
-                        conn.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
+                        conn.execute(
+                            "DELETE FROM files_fts WHERE rowid = ?", (file_id,)
+                        )
                         try:
                             if _table_exists(conn, "files_fts_trigram"):
-                                conn.execute("DELETE FROM files_fts_trigram WHERE rowid = ?", (file_id,))
+                                conn.execute(
+                                    "DELETE FROM files_fts_trigram WHERE rowid = ?",
+                                    (file_id,),
+                                )
                         except Exception:
                             pass
                         conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
@@ -887,8 +1030,11 @@ def _delete_image_file(path: str) -> bool:
     try:
         global _annoy_needs_rebuild
         from image_search_implementation_v2.db import get_conn as img_get_conn
+
         conn = img_get_conn()
-        row = conn.execute("SELECT id, annoy_id FROM images WHERE path = ?", (path,)).fetchone()
+        row = conn.execute(
+            "SELECT id, annoy_id FROM images WHERE path = ?", (path,)
+        ).fetchone()
         if row:
             image_id = int(row["id"])
             annoy_id = row["annoy_id"]
@@ -921,6 +1067,7 @@ def _delete_video_file(path: str) -> bool:
     """Delete video, frames, and frame vectors from database."""
     try:
         from video_search_implementation_v2.video_index import _get_conn
+
         conn = _get_conn()
         row = conn.execute("SELECT id FROM videos WHERE path = ?", (path,)).fetchone()
         if row:
@@ -931,11 +1078,15 @@ def _delete_video_file(path: str) -> bool:
             ).fetchall()
             for frame in frames:
                 try:
-                    conn.execute("DELETE FROM frame_vectors WHERE rowid = ?", (frame["id"],))
+                    conn.execute(
+                        "DELETE FROM frame_vectors WHERE rowid = ?", (frame["id"],)
+                    )
                 except Exception:
                     pass
                 try:
-                    conn.execute("DELETE FROM frames_fts WHERE rowid = ?", (frame["id"],))
+                    conn.execute(
+                        "DELETE FROM frames_fts WHERE rowid = ?", (frame["id"],)
+                    )
                 except Exception:
                     pass
             # Delete frames and video
@@ -956,6 +1107,7 @@ def _delete_audio_file(path: str) -> bool:
     """Delete audio transcript entries from text database."""
     try:
         from text_search_implementation_v2.db import delete_file_by_path_category
+
         # Audio transcripts are stored as text with category 'audio_transcript'
         result = delete_file_by_path_category(path, "audio_transcript")
         if result:
@@ -971,7 +1123,10 @@ def _delete_code_file(path: str) -> bool:
     try:
         conn = _code_db_conn()
         # Delete code chunks for this file
-        conn.execute("DELETE FROM code_chunk_vectors WHERE chunk_id IN (SELECT id FROM code_chunks WHERE file_path = ?)", (path,))
+        conn.execute(
+            "DELETE FROM code_chunk_vectors WHERE chunk_id IN (SELECT id FROM code_chunks WHERE file_path = ?)",
+            (path,),
+        )
         conn.execute("DELETE FROM code_chunks WHERE file_path = ?", (path,))
         # Delete symbols
         conn.execute("DELETE FROM code_symbols WHERE file_path = ?", (path,))
@@ -990,11 +1145,18 @@ def _delete_code_file(path: str) -> bool:
 
 def cleanup_stale_entries() -> dict[str, int]:
     """Remove database entries for files that no longer exist on disk."""
-    results = {"text_removed": 0, "image_removed": 0, "video_removed": 0, "audio_removed": 0, "code_removed": 0}
+    results = {
+        "text_removed": 0,
+        "image_removed": 0,
+        "video_removed": 0,
+        "audio_removed": 0,
+        "code_removed": 0,
+    }
 
     # Clean up text files
     try:
         from text_search_implementation_v2.db import get_conn as text_get_conn
+
         conn = text_get_conn()
         rows = conn.execute("SELECT path FROM files").fetchall()
         for row in rows:
@@ -1009,6 +1171,7 @@ def cleanup_stale_entries() -> dict[str, int]:
     # Clean up image files
     try:
         from image_search_implementation_v2.db import get_conn as img_get_conn
+
         conn = img_get_conn()
         rows = conn.execute("SELECT path FROM images").fetchall()
         for row in rows:
@@ -1022,7 +1185,10 @@ def cleanup_stale_entries() -> dict[str, int]:
 
     # Clean up video files
     try:
-        from video_search_implementation_v2.video_index import _get_conn as video_get_conn
+        from video_search_implementation_v2.video_index import (
+            _get_conn as video_get_conn,
+        )
+
         conn = video_get_conn()
         rows = conn.execute("SELECT path FROM videos").fetchall()
         for row in rows:
@@ -1082,7 +1248,9 @@ def _route_watch_delete_event(src_path: str) -> None:
         print(f"🗑️  Deleting as video file: {src_path}")
         _delete_video_file(src_path)
     # Code files
-    if enabled["code"] and (path.name in CODE_SPECIAL_FILENAMES or suffix in CODE_WATCH_EXTS):
+    if enabled["code"] and (
+        path.name in CODE_SPECIAL_FILENAMES or suffix in CODE_WATCH_EXTS
+    ):
         print(f"🗑️  Deleting as code file: {src_path}")
         _delete_code_file(src_path)
 
@@ -1105,7 +1273,9 @@ def _route_watch_event(src_path: str) -> None:
         _enqueue_watch_job("audio", scan_dir)
     if enabled["video"] and suffix in VIDEO_WATCH_EXTS:
         _enqueue_watch_job("video", scan_dir)
-    if enabled["code"] and (path.name in CODE_SPECIAL_FILENAMES or suffix in CODE_WATCH_EXTS):
+    if enabled["code"] and (
+        path.name in CODE_SPECIAL_FILENAMES or suffix in CODE_WATCH_EXTS
+    ):
         _enqueue_watch_job("code", scan_dir)
 
 
@@ -1121,7 +1291,9 @@ def _content_watch_worker():
         try:
             active, state = index_lock_active()
             if active:
-                print(f"watcher [{modality}] skipped: full index already running from {state.get('source', 'unknown')}")
+                print(
+                    f"watcher [{modality}] skipped: full index already running from {state.get('source', 'unknown')}"
+                )
                 continue
             if modality == "text":
                 scan_text_index(target_dir)
@@ -1153,6 +1325,7 @@ def start_content_watcher():
     try:
         from watchdog.events import FileSystemEventHandler
         from watchdog.observers import Observer
+
         _watcher_log("watchdog imported successfully")
     except Exception as exc:
         msg = f"watcher disabled: watchdog unavailable: {exc}"
@@ -1192,7 +1365,9 @@ def start_content_watcher():
 
     _watcher_log("Starting worker thread and observer")
     _watch_stop_event.clear()
-    _watch_worker_thread = threading.Thread(target=_content_watch_worker, daemon=True, name="contextcore-watcher")
+    _watch_worker_thread = threading.Thread(
+        target=_content_watch_worker, daemon=True, name="contextcore-watcher"
+    )
     _watch_worker_thread.start()
     _watcher_log("Worker thread started")
 
@@ -1337,8 +1512,12 @@ def _scan_code_signals(
     file_count = 0
     test_file_count = 0
     import_link_count = 0
-    readme_present = any((root / n).exists() for n in ("README", "README.md", "README.txt"))
-    changelog_present = any((root / n).exists() for n in ("CHANGELOG", "CHANGELOG.md", "HISTORY.md"))
+    readme_present = any(
+        (root / n).exists() for n in ("README", "README.md", "README.txt")
+    )
+    changelog_present = any(
+        (root / n).exists() for n in ("CHANGELOG", "CHANGELOG.md", "HISTORY.md")
+    )
     generated_or_dep_dirs: set[str] = set()
     name_style_counts = {"snake": 0, "kebab": 0, "camel": 0, "other": 0}
     base_names: set[str] = set()
@@ -1361,7 +1540,9 @@ def _scan_code_signals(
                 break
             file_count += 1
             file_path = Path(dirpath) / fname
-            if _should_skip_code_path(file_path, root, exclude_dirs, gitignore_patterns):
+            if _should_skip_code_path(
+                file_path, root, exclude_dirs, gitignore_patterns
+            ):
                 continue
             lower_name = fname.lower()
             stem = Path(fname).stem
@@ -1377,7 +1558,19 @@ def _scan_code_signals(
                 test_file_count += 1
 
             ext = file_path.suffix.lower()
-            if ext in {".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".kt", ".php", ".rb"}:
+            if ext in {
+                ".py",
+                ".js",
+                ".ts",
+                ".tsx",
+                ".jsx",
+                ".go",
+                ".rs",
+                ".java",
+                ".kt",
+                ".php",
+                ".rb",
+            }:
                 code_files.append(file_path)
 
     for file_path in code_files[: min(len(code_files), 300)]:
@@ -1386,7 +1579,10 @@ def _scan_code_signals(
         except Exception:
             continue
         snippet = text[:8000]
-        matches = re.findall(r"(?:from|import|require|use|include)\s*(?:\(|from)?\s*['\"]([^'\"]+)['\"]", snippet)
+        matches = re.findall(
+            r"(?:from|import|require|use|include)\s*(?:\(|from)?\s*['\"]([^'\"]+)['\"]",
+            snippet,
+        )
         for module in matches:
             mod = module.strip().split("/")[-1].split(".")[-1].lower()
             if module.startswith((".", "/")) or mod in base_names:
@@ -1398,7 +1594,11 @@ def _scan_code_signals(
 
     dominant_style = max(name_style_counts, key=name_style_counts.get)
     dominant_count = name_style_counts[dominant_style]
-    naming_consistent = file_count >= 8 and dominant_style != "other" and (dominant_count / max(file_count, 1)) >= 0.65
+    naming_consistent = (
+        file_count >= 8
+        and dominant_style != "other"
+        and (dominant_count / max(file_count, 1)) >= 0.65
+    )
 
     return {
         "file_count_scanned": file_count,
@@ -1452,7 +1652,9 @@ def _matches_gitignore(rel_posix: str, name: str, patterns: list[str]) -> bool:
     return False
 
 
-def _should_skip_code_path(path: Path, repo_root: Path, exclude_dirs: set[str], gitignore_patterns: list[str]) -> bool:
+def _should_skip_code_path(
+    path: Path, repo_root: Path, exclude_dirs: set[str], gitignore_patterns: list[str]
+) -> bool:
     try:
         rel_posix = str(path.resolve().relative_to(repo_root).as_posix())
     except Exception:
@@ -1505,15 +1707,26 @@ def _codebase_score(
         "language_manifest": 30 if manifest_markers else 0,
         "framework_config": 20 if framework_markers else 0,
         "test_files": 15 if int(scan_signals.get("test_file_count", 0)) > 0 else 0,
-        "inter_file_imports": 15 if int(scan_signals.get("import_link_count", 0)) > 0 else 0,
-        "readme_or_changelog": 10 if scan_signals.get("readme_present") or scan_signals.get("changelog_present") else 0,
+        "inter_file_imports": (
+            15 if int(scan_signals.get("import_link_count", 0)) > 0 else 0
+        ),
+        "readme_or_changelog": (
+            10
+            if scan_signals.get("readme_present")
+            or scan_signals.get("changelog_present")
+            else 0
+        ),
         "consistent_naming": 10 if scan_signals.get("naming_consistent") else 0,
-        "generated_or_dependency_dirs": 10 if scan_signals.get("generated_or_dependency_dirs_detected") else 0,
+        "generated_or_dependency_dirs": (
+            10 if scan_signals.get("generated_or_dependency_dirs_detected") else 0
+        ),
     }
     return sum(breakdown.values()), breakdown
 
 
-def analyze_code_directory(path: Path, threshold: int = 40, max_scan_files: int = 5000) -> dict[str, Any]:
+def analyze_code_directory(
+    path: Path, threshold: int = 40, max_scan_files: int = 5000
+) -> dict[str, Any]:
     target = path.resolve()
     if not target.exists():
         return {"ok": False, "error": "path_not_found", "path": str(target)}
@@ -1586,7 +1799,9 @@ def scan_code_index_wrapper(path: Optional[str] = None) -> dict[str, Any]:
             analysis = analyze_code_directory(root)
             if analysis.get("is_code_directory"):
                 build = build_code_layer1_index(root)
-                reports.append({"root": str(root), "analysis": analysis, "build": build})
+                reports.append(
+                    {"root": str(root), "analysis": analysis, "build": build}
+                )
                 continue
 
             nested_reports = []
@@ -1610,15 +1825,25 @@ def scan_code_index_wrapper(path: Optional[str] = None) -> dict[str, Any]:
                     {
                         "root": str(root),
                         "analysis": analysis,
-                        "build": {"status": "skipped_not_code_directory", "analysis": analysis},
+                        "build": {
+                            "status": "skipped_not_code_directory",
+                            "analysis": analysis,
+                        },
                     }
                 )
         report_storage_dir = STORAGE_DIR / "storage"
         report_storage_dir.mkdir(parents=True, exist_ok=True)
         report_path = report_storage_dir / "code_index_analysis_latest.json"
-        report_path.write_text(json.dumps({"reports": reports}, indent=2), encoding="utf-8")
+        report_path.write_text(
+            json.dumps({"reports": reports}, indent=2), encoding="utf-8"
+        )
         if len(reports) == 1:
-            return {"status": "ok", "analysis": reports[0]["analysis"], "build": reports[0]["build"], "report_path": str(report_path)}
+            return {
+                "status": "ok",
+                "analysis": reports[0]["analysis"],
+                "build": reports[0]["build"],
+                "report_path": str(report_path),
+            }
         return {"status": "ok", "reports": reports, "report_path": str(report_path)}
     except Exception as e:
         traceback.print_exc()
@@ -1649,8 +1874,25 @@ def _discover_nested_code_roots(root: Path, max_candidates: int = 200) -> list[P
         "Makefile",
     }
     code_exts = {
-        ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rs", ".c", ".cpp",
-        ".cc", ".cxx", ".h", ".hpp", ".cs", ".php", ".rb", ".swift", ".kt",
+        ".py",
+        ".js",
+        ".ts",
+        ".tsx",
+        ".jsx",
+        ".java",
+        ".go",
+        ".rs",
+        ".c",
+        ".cpp",
+        ".cc",
+        ".cxx",
+        ".h",
+        ".hpp",
+        ".cs",
+        ".php",
+        ".rb",
+        ".swift",
+        ".kt",
     }
 
     for dirpath, dirnames, filenames in os.walk(root):
@@ -1664,7 +1906,9 @@ def _discover_nested_code_roots(root: Path, max_candidates: int = 200) -> list[P
         dirnames[:] = [d for d in dirnames if d not in COMMON_CODE_EXCLUDE_DIRS]
 
         has_marker = any(name in marker_files for name in filenames)
-        code_file_count = sum(1 for name in filenames if Path(name).suffix.lower() in code_exts)
+        code_file_count = sum(
+            1 for name in filenames if Path(name).suffix.lower() in code_exts
+        )
         if not has_marker and code_file_count < 3:
             continue
 
@@ -1689,11 +1933,15 @@ def _startup_catchup_scan() -> None:
     if get_enable_image() and importlib.util.find_spec("transformers") is not None:
         jobs.append(("image", lambda: scan_image_index(None)))
     elif get_enable_image():
-        print(f"startup catch-up [image] skipped: install with {sys.executable} -m pip install --no-cache-dir torch torchvision transformers")
+        print(
+            f"startup catch-up [image] skipped: install with {sys.executable} -m pip install --no-cache-dir torch torchvision transformers"
+        )
     if get_enable_audio() and importlib.util.find_spec("faster_whisper") is not None:
         jobs.append(("audio", lambda: scan_audio_index_wrapper(None)))
     elif get_enable_audio():
-        print(f"startup catch-up [audio] skipped: install with {sys.executable} -m pip install --no-cache-dir faster-whisper")
+        print(
+            f"startup catch-up [audio] skipped: install with {sys.executable} -m pip install --no-cache-dir faster-whisper"
+        )
     if get_enable_video():
         jobs.append(("video", lambda: scan_video_index_wrapper(None)))
     if get_enable_code():
@@ -1707,23 +1955,50 @@ def _startup_catchup_scan() -> None:
     modalities = [name for name, _ in jobs]
     acquired, state = acquire_index_lock("startup_catchup", targets, modalities)
     if not acquired:
-        print(f"startup catch-up scan skipped: index already running from {state.get('source', 'unknown')}")
+        print(
+            f"startup catch-up scan skipped: index already running from {state.get('source', 'unknown')}"
+        )
         return
 
     print("startup catch-up scan: checking configured folders for missed files")
-    update_index_state(progress={"stage": "running", "current_modality": None, "completed_modalities": []})
+    update_index_state(
+        progress={
+            "stage": "running",
+            "current_modality": None,
+            "completed_modalities": [],
+        }
+    )
     completed: list[str] = []
     try:
         for name, fn in jobs:
             try:
-                update_index_state(progress={"stage": "running", "current_modality": name, "completed_modalities": completed})
+                update_index_state(
+                    progress={
+                        "stage": "running",
+                        "current_modality": name,
+                        "completed_modalities": completed,
+                    }
+                )
                 print(f"startup catch-up [{name}] starting")
                 result = fn()
                 completed.append(name)
-                update_index_state(progress={"stage": "running", "current_modality": name, "completed_modalities": completed, "last_result": {name: result}})
+                update_index_state(
+                    progress={
+                        "stage": "running",
+                        "current_modality": name,
+                        "completed_modalities": completed,
+                        "last_result": {name: result},
+                    }
+                )
                 print(f"startup catch-up [{name}] -> {result}")
             except Exception as exc:
-                update_index_state(progress={"stage": "failed", "current_modality": name, "completed_modalities": completed})
+                update_index_state(
+                    progress={
+                        "stage": "failed",
+                        "current_modality": name,
+                        "completed_modalities": completed,
+                    }
+                )
                 print(f"startup catch-up [{name}] failed: {exc}")
         release_index_lock(result="completed")
     except Exception as exc:
@@ -1746,8 +2021,7 @@ def _code_db_conn() -> sqlite3.Connection:
 
 def _init_code_index_db() -> None:
     conn = _code_db_conn()
-    conn.executescript(
-        """
+    conn.executescript("""
         CREATE TABLE IF NOT EXISTS repositories (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             root_path TEXT UNIQUE NOT NULL,
@@ -1877,8 +2151,7 @@ def _init_code_index_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_code_chunks_repo_rel ON code_chunks(repo_path, relative_path);
         CREATE INDEX IF NOT EXISTS idx_ext_deps_repo ON external_dependencies(repo_path);
         CREATE INDEX IF NOT EXISTS idx_int_deps_repo ON internal_dependencies(repo_path);
-        """
-    )
+        """)
     conn.commit()
     conn.close()
 
@@ -1976,7 +2249,9 @@ def _load_code_chunk_annoy_state() -> dict[str, Any]:
 
 def _save_code_chunk_annoy_state(state: dict[str, Any]) -> None:
     CODE_CHUNK_ANNOY_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CODE_CHUNK_ANNOY_STATE_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    CODE_CHUNK_ANNOY_STATE_PATH.write_text(
+        json.dumps(state, indent=2), encoding="utf-8"
+    )
 
 
 def _mark_code_chunk_annoy_dirty() -> None:
@@ -2015,7 +2290,9 @@ def _upsert_code_chunks_for_file(
         "DELETE FROM code_chunk_vectors WHERE chunk_id IN (SELECT id FROM code_chunks WHERE repo_path=? AND file_path=?)",
         (repo_s, abs_path),
     )
-    conn.execute("DELETE FROM code_chunks WHERE repo_path=? AND file_path=?", (repo_s, abs_path))
+    conn.execute(
+        "DELETE FROM code_chunks WHERE repo_path=? AND file_path=?", (repo_s, abs_path)
+    )
 
     chunks = _split_code_chunks_by_lines(
         content,
@@ -2027,7 +2304,9 @@ def _upsert_code_chunks_for_file(
         chunk_text = str(c.get("chunk", "")).strip()
         if not chunk_text:
             continue
-        chunk_hash = hashlib.sha256(chunk_text.encode("utf-8", errors="ignore")).hexdigest()
+        chunk_hash = hashlib.sha256(
+            chunk_text.encode("utf-8", errors="ignore")
+        ).hexdigest()
         cur = conn.execute(
             """
             INSERT INTO code_chunks(
@@ -2062,14 +2341,12 @@ def _rebuild_code_chunk_annoy_index(n_trees: int = 10) -> dict[str, Any]:
             return {"ok": False, "error": "annoy_not_installed", "indexed_vectors": 0}
 
         conn = _code_db_conn()
-        rows = conn.execute(
-            """
+        rows = conn.execute("""
             SELECT cc.id AS chunk_id, cv.vector_json
             FROM code_chunks cc
             JOIN code_chunk_vectors cv ON cv.chunk_id = cc.id
             ORDER BY cc.id ASC
-            """
-        ).fetchall()
+            """).fetchall()
         conn.close()
 
         parsed: list[tuple[int, list[float]]] = []
@@ -2094,7 +2371,12 @@ def _rebuild_code_chunk_annoy_index(n_trees: int = 10) -> dict[str, Any]:
             _code_chunk_annoy_index = None
             _code_chunk_annoy_loaded = True
             _clear_code_chunk_annoy_dirty()
-            return {"ok": True, "indexed_vectors": 0, "index_exists": False, "ready": False}
+            return {
+                "ok": True,
+                "indexed_vectors": 0,
+                "index_exists": False,
+                "ready": False,
+            }
 
         from annoy import AnnoyIndex
 
@@ -2128,13 +2410,11 @@ def _ensure_code_chunk_annoy_ready() -> dict[str, Any]:
         return {"ok": True, "ready": True, "index_exists": True}
 
     conn = _code_db_conn()
-    row = conn.execute(
-        """
+    row = conn.execute("""
         SELECT cv.vector_json
         FROM code_chunk_vectors cv
         LIMIT 1
-        """
-    ).fetchone()
+        """).fetchone()
     conn.close()
     if not row:
         _code_chunk_annoy_index = None
@@ -2163,7 +2443,9 @@ def _ensure_code_chunk_annoy_ready() -> dict[str, Any]:
         return _rebuild_code_chunk_annoy_index()
 
 
-def _search_code_chunk_annoy(query_vector: list[float], top_k: int = 100) -> list[dict[str, float]]:
+def _search_code_chunk_annoy(
+    query_vector: list[float], top_k: int = 100
+) -> list[dict[str, float]]:
     if not isinstance(query_vector, list) or not query_vector:
         return []
     ready = _ensure_code_chunk_annoy_ready()
@@ -2182,7 +2464,9 @@ def _search_code_chunk_annoy(query_vector: list[float], top_k: int = 100) -> lis
     out: list[dict[str, float]] = []
     for chunk_id, dist in zip(ids, dists):
         sem = max(0.0, float(1.0 - float(dist) / 2.0))
-        out.append({"chunk_id": int(chunk_id), "distance": float(dist), "semantic_score": sem})
+        out.append(
+            {"chunk_id": int(chunk_id), "distance": float(dist), "semantic_score": sem}
+        )
     return out
 
 
@@ -2276,7 +2560,9 @@ def _extract_js_like_symbols_and_imports(content: str) -> dict[str, Any]:
     internal: set[str] = set()
     symbols: list[dict[str, Any]] = []
 
-    import_matches = re.findall(r"(?:import\s+.*?\s+from\s+|require\(|import\()\s*['\"]([^'\"]+)['\"]", content)
+    import_matches = re.findall(
+        r"(?:import\s+.*?\s+from\s+|require\(|import\()\s*['\"]([^'\"]+)['\"]", content
+    )
     for import_path in import_matches:
         if import_path.startswith(("./", "../", "/")):
             internal.add(import_path)
@@ -2295,7 +2581,11 @@ def _extract_js_like_symbols_and_imports(content: str) -> dict[str, Any]:
                 "is_public": 1,
             }
         )
-    for m in re.finditer(r"^\s*(?:export\s+)?function\s+([A-Za-z_]\w*)\s*\(([^)]*)\)", content, flags=re.M):
+    for m in re.finditer(
+        r"^\s*(?:export\s+)?function\s+([A-Za-z_]\w*)\s*\(([^)]*)\)",
+        content,
+        flags=re.M,
+    ):
         symbols.append(
             {
                 "name": m.group(1),
@@ -2328,7 +2618,9 @@ def _extract_rust_symbols_and_imports(content: str) -> dict[str, Any]:
         else:
             external.add(imp.split("::")[0])
 
-    for m in re.finditer(r"^\s*(?:pub\s+)?fn\s+([A-Za-z_]\w*)\s*\(([^)]*)\)", content, flags=re.M):
+    for m in re.finditer(
+        r"^\s*(?:pub\s+)?fn\s+([A-Za-z_]\w*)\s*\(([^)]*)\)", content, flags=re.M
+    ):
         name = m.group(1)
         symbols.append(
             {
@@ -2341,7 +2633,9 @@ def _extract_rust_symbols_and_imports(content: str) -> dict[str, Any]:
                 "is_public": 1 if re.search(r"^\s*pub\s+fn", m.group(0)) else 0,
             }
         )
-    for m in re.finditer(r"^\s*(?:pub\s+)?(struct|trait|enum)\s+([A-Za-z_]\w*)", content, flags=re.M):
+    for m in re.finditer(
+        r"^\s*(?:pub\s+)?(struct|trait|enum)\s+([A-Za-z_]\w*)", content, flags=re.M
+    ):
         kind = m.group(1)
         name = m.group(2)
         symbols.append(
@@ -2403,23 +2697,51 @@ def _is_entry_point_file(rel_path: str, filename: str) -> bool:
     lname = filename.lower()
     rel = rel_path.lower()
     entry_names = {
-        "main.py", "app.py", "server.py", "manage.py", "cli.py",
-        "index.js", "index.ts", "main.rs", "main.go", "program.cs",
+        "main.py",
+        "app.py",
+        "server.py",
+        "manage.py",
+        "cli.py",
+        "index.js",
+        "index.ts",
+        "main.rs",
+        "main.go",
+        "program.cs",
     }
     if lname in entry_names:
         return True
-    return rel.startswith("cmd/") or "/cmd/" in rel or rel.startswith("bin/") or "/bin/" in rel
+    return (
+        rel.startswith("cmd/")
+        or "/cmd/" in rel
+        or rel.startswith("bin/")
+        or "/bin/" in rel
+    )
 
 
 def _is_test_file_name(filename: str) -> bool:
     n = filename.lower()
-    return n.startswith("test_") or n.endswith("_test.py") or ".test." in n or ".spec." in n
+    return (
+        n.startswith("test_")
+        or n.endswith("_test.py")
+        or ".test." in n
+        or ".spec." in n
+    )
 
 
 def _is_config_file(path: Path) -> bool:
     if path.name.startswith("."):
         return True
-    return path.suffix.lower() in {".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env", ".xml"}
+    return path.suffix.lower() in {
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".ini",
+        ".cfg",
+        ".conf",
+        ".env",
+        ".xml",
+    }
 
 
 def _doc_brief(text: str | None, max_chars: int = 100) -> str | None:
@@ -2437,7 +2759,11 @@ def _extract_manifest_dependencies(project_root: Path) -> list[dict[str, str]]:
     if pkg.exists():
         try:
             data = json.loads(_safe_read_text(pkg))
-            for dep_type, dep_key in (("runtime", "dependencies"), ("dev", "devDependencies"), ("optional", "optionalDependencies")):
+            for dep_type, dep_key in (
+                ("runtime", "dependencies"),
+                ("dev", "devDependencies"),
+                ("optional", "optionalDependencies"),
+            ):
                 items = data.get(dep_key, {})
                 if isinstance(items, dict):
                     for name, version in items.items():
@@ -2487,7 +2813,7 @@ def _extract_manifest_dependencies(project_root: Path) -> list[dict[str, str]]:
                     continue
                 if not in_deps or not s or s.startswith("#"):
                     continue
-                m = re.match(r'^([A-Za-z0-9_.\-]+)\s*=\s*(.+)$', s)
+                m = re.match(r"^([A-Za-z0-9_.\-]+)\s*=\s*(.+)$", s)
                 if m:
                     deps.append(
                         {
@@ -2507,7 +2833,11 @@ def _extract_manifest_dependencies(project_root: Path) -> list[dict[str, str]]:
             text = _safe_read_text(gomod)
             for line in text.splitlines():
                 s = line.strip()
-                if not s or s.startswith("//") or s.startswith(("module ", "go ", "require (", ")")):
+                if (
+                    not s
+                    or s.startswith("//")
+                    or s.startswith(("module ", "go ", "require (", ")"))
+                ):
                     continue
                 parts = s.split()
                 if len(parts) >= 2:
@@ -2529,7 +2859,9 @@ def _extract_manifest_dependencies(project_root: Path) -> list[dict[str, str]]:
     return list(uniq.values())
 
 
-def build_code_layer1_index(path: Path, force: bool = False, max_files: int = 20000) -> dict[str, Any]:
+def build_code_layer1_index(
+    path: Path, force: bool = False, max_files: int = 20000
+) -> dict[str, Any]:
     _init_code_index_db()
     analysis = analyze_code_directory(path)
     if not analysis.get("ok"):
@@ -2541,7 +2873,9 @@ def build_code_layer1_index(path: Path, force: bool = False, max_files: int = 20
         }
 
     project_root = Path(analysis["project_root"]).resolve()
-    exclude_dirs = set(analysis.get("indexing_guidance", {}).get("exclude_directories", []))
+    exclude_dirs = set(
+        analysis.get("indexing_guidance", {}).get("exclude_directories", [])
+    )
     gitignore_patterns = _load_gitignore_patterns(project_root)
     now = _now_iso()
     conn = _code_db_conn()
@@ -2553,7 +2887,10 @@ def build_code_layer1_index(path: Path, force: bool = False, max_files: int = 20
     scanned = 0
     seen_abs_paths: set[str] = set()
 
-    row = conn.execute("SELECT id, first_indexed_at FROM repositories WHERE root_path=?", (str(project_root),)).fetchone()
+    row = conn.execute(
+        "SELECT id, first_indexed_at FROM repositories WHERE root_path=?",
+        (str(project_root),),
+    ).fetchone()
     if row:
         repo_id = int(row["id"])
         first_indexed_at = str(row["first_indexed_at"])
@@ -2569,8 +2906,12 @@ def build_code_layer1_index(path: Path, force: bool = False, max_files: int = 20
         first_indexed_at = now
 
     # Layer 3 reset for this repo before rebuild pass.
-    conn.execute("DELETE FROM external_dependencies WHERE repo_path=?", (str(project_root),))
-    conn.execute("DELETE FROM internal_dependencies WHERE repo_path=?", (str(project_root),))
+    conn.execute(
+        "DELETE FROM external_dependencies WHERE repo_path=?", (str(project_root),)
+    )
+    conn.execute(
+        "DELETE FROM internal_dependencies WHERE repo_path=?", (str(project_root),)
+    )
 
     manifest_deps = _extract_manifest_dependencies(project_root)
     for dep in manifest_deps:
@@ -2592,7 +2933,9 @@ def build_code_layer1_index(path: Path, force: bool = False, max_files: int = 20
         kept_dirs: list[str] = []
         for d in dirnames:
             child = Path(dirpath) / d
-            if _should_skip_code_path(child, project_root, exclude_dirs, gitignore_patterns):
+            if _should_skip_code_path(
+                child, project_root, exclude_dirs, gitignore_patterns
+            ):
                 continue
             kept_dirs.append(d)
         dirnames[:] = kept_dirs
@@ -2601,7 +2944,9 @@ def build_code_layer1_index(path: Path, force: bool = False, max_files: int = 20
                 break
             scanned += 1
             file_path = Path(dirpath) / fname
-            if _should_skip_code_path(file_path, project_root, exclude_dirs, gitignore_patterns):
+            if _should_skip_code_path(
+                file_path, project_root, exclude_dirs, gitignore_patterns
+            ):
                 skipped_noncode += 1
                 continue
             if not _is_code_candidate(file_path):
@@ -2618,7 +2963,9 @@ def build_code_layer1_index(path: Path, force: bool = False, max_files: int = 20
                     continue
                 mtime = float(stat.st_mtime)
                 abs_path = str(file_path.resolve())
-                rel_path = str(file_path.resolve().relative_to(project_root)).replace("\\", "/")
+                rel_path = str(file_path.resolve().relative_to(project_root)).replace(
+                    "\\", "/"
+                )
                 ext = file_path.suffix.lower()
                 lang = _language_from_path(file_path)
                 seen_abs_paths.add(abs_path)
@@ -2627,7 +2974,11 @@ def build_code_layer1_index(path: Path, force: bool = False, max_files: int = 20
                     "SELECT id, mtime FROM files WHERE abs_path=?",
                     (abs_path,),
                 ).fetchone()
-                if existing and (not force) and abs(float(existing["mtime"]) - mtime) < 1e-6:
+                if (
+                    existing
+                    and (not force)
+                    and abs(float(existing["mtime"]) - mtime) < 1e-6
+                ):
                     has_pf = conn.execute(
                         "SELECT 1 FROM project_files WHERE file_path=? LIMIT 1",
                         (abs_path,),
@@ -2681,14 +3032,22 @@ def build_code_layer1_index(path: Path, force: bool = False, max_files: int = 20
                         json.dumps(facts.get("internal_imports", [])),
                     ),
                 )
-                file_row = conn.execute("SELECT id FROM files WHERE abs_path=?", (abs_path,)).fetchone()
+                file_row = conn.execute(
+                    "SELECT id FROM files WHERE abs_path=?", (abs_path,)
+                ).fetchone()
                 if not file_row:
                     failed += 1
                     continue
                 file_id = int(file_row["id"])
                 conn.execute("DELETE FROM symbols WHERE file_id=?", (file_id,))
-                conn.execute("DELETE FROM code_symbols WHERE repo_path=? AND file_path=?", (str(project_root), abs_path))
-                conn.execute("DELETE FROM internal_dependencies WHERE repo_path=? AND source_file=?", (str(project_root), rel_path))
+                conn.execute(
+                    "DELETE FROM code_symbols WHERE repo_path=? AND file_path=?",
+                    (str(project_root), abs_path),
+                )
+                conn.execute(
+                    "DELETE FROM internal_dependencies WHERE repo_path=? AND source_file=?",
+                    (str(project_root), rel_path),
+                )
                 for s in facts.get("symbols", []):
                     conn.execute(
                         """
@@ -2794,14 +3153,23 @@ def build_code_layer1_index(path: Path, force: bool = False, max_files: int = 20
     ).fetchall()
 
     # Remove stale rows for deleted files.
-    stale_rows = conn.execute("SELECT abs_path FROM files WHERE repo_id=?", (repo_id,)).fetchall()
-    stale_abs = [str(r["abs_path"]) for r in stale_rows if str(r["abs_path"]) not in seen_abs_paths]
+    stale_rows = conn.execute(
+        "SELECT abs_path FROM files WHERE repo_id=?", (repo_id,)
+    ).fetchall()
+    stale_abs = [
+        str(r["abs_path"])
+        for r in stale_rows
+        if str(r["abs_path"]) not in seen_abs_paths
+    ]
     for abs_path in stale_abs:
         conn.execute(
             "DELETE FROM code_chunk_vectors WHERE chunk_id IN (SELECT id FROM code_chunks WHERE repo_path=? AND file_path=?)",
             (str(project_root), abs_path),
         )
-        conn.execute("DELETE FROM code_chunks WHERE repo_path=? AND file_path=?", (str(project_root), abs_path))
+        conn.execute(
+            "DELETE FROM code_chunks WHERE repo_path=? AND file_path=?",
+            (str(project_root), abs_path),
+        )
         conn.execute("DELETE FROM files WHERE abs_path=?", (abs_path,))
         conn.execute("DELETE FROM project_files WHERE file_path=?", (abs_path,))
         conn.execute("DELETE FROM code_symbols WHERE file_path=?", (abs_path,))
@@ -2933,7 +3301,7 @@ def _run_image_search_legacy(query: str, top_k: int = 10):
         if not ensure_annoy_loaded():
             return {"error": "annoy_unavailable"}
         conn = _get_image_conn()
-        cnt  = conn.execute(
+        cnt = conn.execute(
             "SELECT COUNT(*) as c FROM images WHERE annoy_id IS NOT NULL"
         ).fetchone()[0]
         conn.close()
@@ -2945,20 +3313,22 @@ def _run_image_search_legacy(query: str, top_k: int = 10):
         ids, dists = _annoy_index.get_nns_by_vector(
             qvec.tolist(), top_k, include_distances=True
         )
-        conn    = _get_image_conn()
+        conn = _get_image_conn()
         results = []
         for aid, dist in zip(ids, dists):
             row = conn.execute(
                 "SELECT path FROM images WHERE annoy_id=?", (aid,)
             ).fetchone()
             if row:
-                results.append({
-                    "path":     row[0],
-                    "annoy_id": aid,
-                    "score":    float(1.0 - dist / 2.0),
-                })
+                results.append(
+                    {
+                        "path": row[0],
+                        "annoy_id": aid,
+                        "score": float(1.0 - dist / 2.0),
+                    }
+                )
         conn.close()
-        return {"hits": results[:max(1, int(top_k))]}
+        return {"hits": results[: max(1, int(top_k))]}
     except Exception as e:
         traceback.print_exc()
         return {"error": str(e)}
@@ -3028,7 +3398,11 @@ def run_video_search(query: str, top_k: int = 10):
 
 def run_audio_search(query: str, top_k: int = 10):
     try:
-        from text_search_implementation_v2.db import query_fts, get_file_metadata_by_ids, get_fts_content_by_ids
+        from text_search_implementation_v2.db import (
+            query_fts,
+            get_file_metadata_by_ids,
+            get_fts_content_by_ids,
+        )
 
         tokens = query.strip().lower().split()
         if tokens:
@@ -3044,13 +3418,15 @@ def run_audio_search(query: str, top_k: int = 10):
                 continue
 
             content = get_fts_content_by_ids([r["id"]]).get(r["id"], "")
-            audio_results.append({
-                "path": meta["path"],
-                "filename": meta["filename"],
-                "category": meta["category"],
-                "score": -float(r["score"]),
-                "transcript": content[:500] if content else "",
-            })
+            audio_results.append(
+                {
+                    "path": meta["path"],
+                    "filename": meta["filename"],
+                    "category": meta["category"],
+                    "score": -float(r["score"]),
+                    "transcript": content[:500] if content else "",
+                }
+            )
             if len(audio_results) >= top_k:
                 break
 
@@ -3064,7 +3440,7 @@ def run_audio_search(query: str, top_k: int = 10):
 #  FastAPI app
 # ═══════════════════════════════════════════════════════════════
 app = FastAPI(title="Unified Search — memory-managed")
-rm  = ResourceManager()
+rm = ResourceManager()
 
 
 @app.on_event("startup")
@@ -3072,7 +3448,9 @@ async def startup():
     init_image_meta_db()
     print("🚀 unimain started (no idle-unload — models persist until switched)")
     network_bootstrap()
-    auto_prewarm = os.getenv("CONTEXTCORE_PREWARM_ON_STARTUP", "1").strip().lower() not in {"0", "false", "no"}
+    auto_prewarm = os.getenv(
+        "CONTEXTCORE_PREWARM_ON_STARTUP", "1"
+    ).strip().lower() not in {"0", "false", "no"}
     if auto_prewarm:
         print("🔥 startup prewarm enabled")
         try:
@@ -3082,27 +3460,44 @@ async def startup():
         if get_enable_image() or get_enable_video():
             if importlib.util.find_spec("transformers") is None:
                 print("⚠️ CLIP prewarm skipped: transformers not installed")
-                print(f"   Install with: {sys.executable} -m pip install --no-cache-dir torch torchvision transformers")
+                print(
+                    f"   Install with: {sys.executable} -m pip install --no-cache-dir torch torchvision transformers"
+                )
             else:
                 try:
                     lazy_load_clip()
                     print("✅ CLIP prewarmed")
                 except Exception as e:
                     print("⚠️ CLIP prewarm failed:", e)
-                    print(f"   Retry with: {sys.executable} -m pip install --no-cache-dir torch torchvision transformers")
+                    print(
+                        f"   Retry with: {sys.executable} -m pip install --no-cache-dir torch torchvision transformers"
+                    )
 
-    if os.getenv("CONTEXTCORE_ENABLE_WATCHER", "1").strip().lower() not in {"0", "false", "no"}:
+    if os.getenv("CONTEXTCORE_ENABLE_WATCHER", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+    }:
         try:
             print("🔍 Starting content watcher...")
             start_content_watcher()
-            print(f"✅ Watcher started: observer={_watch_observer}, worker={_watch_worker_thread}")
+            print(
+                f"✅ Watcher started: observer={_watch_observer}, worker={_watch_worker_thread}"
+            )
         except Exception as e:
             print(f"⚠️ watcher startup failed: {e}")
             import traceback
+
             traceback.print_exc()
 
-    if os.getenv("CONTEXTCORE_STARTUP_SCAN", "1").strip().lower() not in {"0", "false", "no"}:
-        threading.Thread(target=_startup_catchup_scan, daemon=True, name="contextcore-startup-scan").start()
+    if os.getenv("CONTEXTCORE_STARTUP_SCAN", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+    }:
+        threading.Thread(
+            target=_startup_catchup_scan, daemon=True, name="contextcore-startup-scan"
+        ).start()
 
 
 @app.on_event("shutdown")
@@ -3116,17 +3511,17 @@ async def shutdown():
 @app.get("/health")
 def health():
     return {
-        "status":         "ok",
+        "status": "ok",
         "resource_state": rm._state,
-        "llm_running":    rm._llm_proc is not None and rm._llm_proc.poll() is None,
+        "llm_running": rm._llm_proc is not None and rm._llm_proc.poll() is None,
     }
 
 
 # ── /llm ─────────────────────────────────────────────────────
 @app.post("/llm")
 async def run_llm(
-    query:       str   = Body(..., embed=True),
-    max_tokens:  int   = Body(256, embed=True),
+    query: str = Body(..., embed=True),
+    max_tokens: int = Body(256, embed=True),
     temperature: float = Body(0.7, embed=True),
 ):
     """
@@ -3147,21 +3542,21 @@ async def run_llm(
         raise HTTPException(
             status_code=503,
             detail={
-                "error":           "thermal_throttle",
-                "message":         f"CPU too hot ({current_temp:.1f}°C / limit {THERMAL_LIMIT_C}°C). Please try again shortly.",
-                "current_temp_c":  current_temp,
-                "limit_temp_c":    THERMAL_LIMIT_C,
+                "error": "thermal_throttle",
+                "message": f"CPU too hot ({current_temp:.1f}°C / limit {THERMAL_LIMIT_C}°C). Please try again shortly.",
+                "current_temp_c": current_temp,
+                "limit_temp_c": THERMAL_LIMIT_C,
             },
             headers={"Retry-After": "30"},
         )
 
     async with rm.llm_context():
         payload = {
-            "prompt":      query,
-            "n_predict":   max_tokens,
+            "prompt": query,
+            "n_predict": max_tokens,
             "temperature": temperature,
-            "stop":        ["</s>", "<|im_end|>"],
-            "stream":      False,
+            "stop": ["</s>", "<|im_end|>"],
+            "stream": False,
         }
         try:
             resp = await asyncio.get_event_loop().run_in_executor(
@@ -3175,9 +3570,9 @@ async def run_llm(
             resp.raise_for_status()
             data = resp.json()
             return {
-                "response":         data.get("content", ""),
+                "response": data.get("content", ""),
                 "tokens_predicted": data.get("tokens_predicted"),
-                "stop_reason":      data.get("stop_type"),
+                "stop_reason": data.get("stop_type"),
             }
         except requests.exceptions.Timeout:
             raise HTTPException(504, "LLM inference timed out")
@@ -3212,7 +3607,9 @@ async def unified_search(
 
     mode = modality.strip().lower()
     if mode not in {"all", "text", "image", "video", "audio"}:
-        raise HTTPException(400, "invalid modality; expected all,text,image,video,audio")
+        raise HTTPException(
+            400, "invalid modality; expected all,text,image,video,audio"
+        )
 
     excluded: set[str] = set()
     if exclude_sources:
@@ -3224,7 +3621,7 @@ async def unified_search(
             text_res = image_res = video_res = audio_res = None
             if mode in {"all", "text"}:
                 try:
-                    text_res  = await asyncio.wait_for(
+                    text_res = await asyncio.wait_for(
                         loop.run_in_executor(
                             ex,
                             run_text_search,
@@ -3241,45 +3638,71 @@ async def unified_search(
                         timeout=8,
                     )
                 except Exception as e:
-                    text_res  = {"error": str(e)}
+                    text_res = {"error": str(e)}
             if mode in {"all", "audio"}:
                 try:
                     audio_res = await asyncio.wait_for(
-                        loop.run_in_executor(ex, run_audio_search, q, min(50, top_k)), timeout=8)
+                        loop.run_in_executor(ex, run_audio_search, q, min(50, top_k)),
+                        timeout=8,
+                    )
                 except Exception as e:
                     audio_res = {"error": str(e)}
             if mode in {"all", "image"}:
                 try:
                     image_res = await asyncio.wait_for(
-                        loop.run_in_executor(ex, run_image_search, q, min(50, top_k)), timeout=10)
+                        loop.run_in_executor(ex, run_image_search, q, min(50, top_k)),
+                        timeout=10,
+                    )
                 except Exception as e:
                     image_res = {"error": str(e)}
             if mode in {"all", "video"}:
                 try:
                     video_res = await asyncio.wait_for(
-                        loop.run_in_executor(ex, run_video_search, q, min(50, top_k)), timeout=12)
+                        loop.run_in_executor(ex, run_video_search, q, min(50, top_k)),
+                        timeout=12,
+                    )
                 except Exception as e:
                     video_res = {"error": str(e)}
 
     out = {"query": q, "modality": mode}
     text_results = text_res if isinstance(text_res, list) else []
     text_results = [t for t in text_results if t.get("category") != "audio"]
-    out["text"]  = ({"count": len(text_results),  "results": text_results}
-                    if isinstance(text_res, list)
-                    else {"count": 0, "results": [],
-                          "error": text_res.get("error") if isinstance(text_res, dict) else None})
-    out["audio"] = ({"count": len(audio_res.get("hits", [])), "results": audio_res.get("hits", [])}
-                    if isinstance(audio_res, dict)
-                    else {"count": 0, "results": [],
-                          "error": audio_res.get("error") if isinstance(audio_res, dict) else None})
-    out["image"] = ({"count": len(image_res["hits"]), "results": image_res["hits"]}
-                    if isinstance(image_res, dict) and "hits" in image_res
-                    else {"count": 0, "results": [],
-                          "error": image_res.get("error") if isinstance(image_res, dict) else None})
-    out["video"] = ({"count": len(video_res["hits"]), "results": video_res["hits"]}
-                    if isinstance(video_res, dict) and "hits" in video_res
-                    else {"count": 0, "results": [],
-                          "error": video_res.get("error") if isinstance(video_res, dict) else None})
+    out["text"] = (
+        {"count": len(text_results), "results": text_results}
+        if isinstance(text_res, list)
+        else {
+            "count": 0,
+            "results": [],
+            "error": text_res.get("error") if isinstance(text_res, dict) else None,
+        }
+    )
+    out["audio"] = (
+        {"count": len(audio_res.get("hits", [])), "results": audio_res.get("hits", [])}
+        if isinstance(audio_res, dict)
+        else {
+            "count": 0,
+            "results": [],
+            "error": audio_res.get("error") if isinstance(audio_res, dict) else None,
+        }
+    )
+    out["image"] = (
+        {"count": len(image_res["hits"]), "results": image_res["hits"]}
+        if isinstance(image_res, dict) and "hits" in image_res
+        else {
+            "count": 0,
+            "results": [],
+            "error": image_res.get("error") if isinstance(image_res, dict) else None,
+        }
+    )
+    out["video"] = (
+        {"count": len(video_res["hits"]), "results": video_res["hits"]}
+        if isinstance(video_res, dict) and "hits" in video_res
+        else {
+            "count": 0,
+            "results": [],
+            "error": video_res.get("error") if isinstance(video_res, dict) else None,
+        }
+    )
 
     hit_paths: list[str] = []
     for section in ("text", "audio", "image", "video"):
@@ -3319,11 +3742,11 @@ def text_neighbors(
 # ── /index/scan ───────────────────────────────────────────────
 @app.post("/index/scan")
 async def index_scan(
-    run_text:  bool = True,
+    run_text: bool = True,
     run_image: bool = True,
     run_video: bool = True,
     run_audio: bool = True,
-    run_code:  bool = False,
+    run_code: bool = False,
     code_path: str | None = None,
     target_dir: str | None = None,
 ):
@@ -3342,17 +3765,30 @@ async def index_scan(
             raise HTTPException(404, "target_dir not found")
         if not _is_path_allowed(t_root):
             raise HTTPException(403, "target_dir not allowed")
-    submitted = [n for n, f in [
-        ("text", run_text), ("image", run_image),
-        ("video", run_video), ("audio", run_audio),
-        ("code", run_code),
-    ] if f]
-    targets = [target_dir] if target_dir else [str(path) for path in get_watch_directories()]
+    submitted = [
+        n
+        for n, f in [
+            ("text", run_text),
+            ("image", run_image),
+            ("video", run_video),
+            ("audio", run_audio),
+            ("code", run_code),
+        ]
+        if f
+    ]
+    targets = (
+        [target_dir] if target_dir else [str(path) for path in get_watch_directories()]
+    )
     acquired, state = acquire_index_lock("manual_scan", targets, submitted)
     if not acquired:
         return JSONResponse(
             status_code=409,
-            content={"status": "busy", "jobs": submitted, "target": target_dir if target_dir else "global", "state": state},
+            content={
+                "status": "busy",
+                "jobs": submitted,
+                "target": target_dir if target_dir else "global",
+                "state": state,
+            },
         )
 
     async def _do_scans():
@@ -3363,28 +3799,84 @@ async def index_scan(
                 jobs = []
                 completed: list[str] = []
 
-                update_index_state(progress={"stage": "running", "current_modality": None, "completed_modalities": completed})
+                update_index_state(
+                    progress={
+                        "stage": "running",
+                        "current_modality": None,
+                        "completed_modalities": completed,
+                    }
+                )
 
                 if run_text:
-                    jobs.append(("text", loop.run_in_executor(pool, scan_text_index, target_dir)))
+                    jobs.append(
+                        (
+                            "text",
+                            loop.run_in_executor(pool, scan_text_index, target_dir),
+                        )
+                    )
                 if run_image:
-                    jobs.append(("image", loop.run_in_executor(pool, scan_image_index, target_dir)))
+                    jobs.append(
+                        (
+                            "image",
+                            loop.run_in_executor(pool, scan_image_index, target_dir),
+                        )
+                    )
                 if run_video:
-                    jobs.append(("video", loop.run_in_executor(pool, scan_video_index_wrapper, target_dir)))
+                    jobs.append(
+                        (
+                            "video",
+                            loop.run_in_executor(
+                                pool, scan_video_index_wrapper, target_dir
+                            ),
+                        )
+                    )
                 if run_audio:
-                    jobs.append(("audio", loop.run_in_executor(pool, scan_audio_index_wrapper, target_dir)))
+                    jobs.append(
+                        (
+                            "audio",
+                            loop.run_in_executor(
+                                pool, scan_audio_index_wrapper, target_dir
+                            ),
+                        )
+                    )
                 if run_code:
-                    jobs.append(("code", loop.run_in_executor(pool, lambda: scan_code_index_wrapper(code_path))))
+                    jobs.append(
+                        (
+                            "code",
+                            loop.run_in_executor(
+                                pool, lambda: scan_code_index_wrapper(code_path)
+                            ),
+                        )
+                    )
 
                 for name, fut in jobs:
                     try:
-                        update_index_state(progress={"stage": "running", "current_modality": name, "completed_modalities": completed})
+                        update_index_state(
+                            progress={
+                                "stage": "running",
+                                "current_modality": name,
+                                "completed_modalities": completed,
+                            }
+                        )
                         result = await fut
                         completed.append(name)
-                        update_index_state(progress={"stage": "running", "current_modality": name, "completed_modalities": completed, "last_result": {name: result}})
+                        update_index_state(
+                            progress={
+                                "stage": "running",
+                                "current_modality": name,
+                                "completed_modalities": completed,
+                                "last_result": {name: result},
+                            }
+                        )
                         print(f"scan [{name}]:", result)
                     except Exception as e:
-                        update_index_state(progress={"stage": "failed", "current_modality": name, "completed_modalities": completed})
+                        update_index_state(
+                            progress={
+                                "stage": "failed",
+                                "current_modality": name,
+                                "completed_modalities": completed,
+                            }
+                        )
                         print(f"scan [{name}] error:", e)
                 release_index_lock(result="completed")
                 return
@@ -3397,11 +3889,41 @@ async def index_scan(
             jobs = []
 
             # Always call scan helpers directly — they handle target_dir=None as "use config"
-            if run_text:  jobs.append(("text",  loop.run_in_executor(pool, scan_text_index,          target_dir)))
-            if run_image: jobs.append(("image", loop.run_in_executor(pool, scan_image_index,         target_dir)))
-            if run_video: jobs.append(("video", loop.run_in_executor(pool, scan_video_index_wrapper, target_dir)))
-            if run_audio: jobs.append(("audio", loop.run_in_executor(pool, scan_audio_index_wrapper, target_dir)))
-            if run_code:  jobs.append(("code",  loop.run_in_executor(pool, lambda: scan_code_index_wrapper(code_path))))
+            if run_text:
+                jobs.append(
+                    ("text", loop.run_in_executor(pool, scan_text_index, target_dir))
+                )
+            if run_image:
+                jobs.append(
+                    ("image", loop.run_in_executor(pool, scan_image_index, target_dir))
+                )
+            if run_video:
+                jobs.append(
+                    (
+                        "video",
+                        loop.run_in_executor(
+                            pool, scan_video_index_wrapper, target_dir
+                        ),
+                    )
+                )
+            if run_audio:
+                jobs.append(
+                    (
+                        "audio",
+                        loop.run_in_executor(
+                            pool, scan_audio_index_wrapper, target_dir
+                        ),
+                    )
+                )
+            if run_code:
+                jobs.append(
+                    (
+                        "code",
+                        loop.run_in_executor(
+                            pool, lambda: scan_code_index_wrapper(code_path)
+                        ),
+                    )
+                )
 
             for name, fut in jobs:
                 try:
@@ -3410,12 +3932,22 @@ async def index_scan(
                     print(f"scan [{name}] error:", e)
 
     asyncio.ensure_future(_do_scans())
-    submitted = [n for n, f in [
-        ("text", run_text), ("image", run_image),
-        ("video", run_video), ("audio", run_audio),
-        ("code", run_code),
-    ] if f]
-    return {"status": "accepted", "jobs": submitted, "target": target_dir if target_dir else "global"}
+    submitted = [
+        n
+        for n, f in [
+            ("text", run_text),
+            ("image", run_image),
+            ("video", run_video),
+            ("audio", run_audio),
+            ("code", run_code),
+        ]
+        if f
+    ]
+    return {
+        "status": "accepted",
+        "jobs": submitted,
+        "target": target_dir if target_dir else "global",
+    }
 
 
 @app.post("/index/cloud/scan")
@@ -3429,16 +3961,29 @@ async def index_cloud_scan(
     if not acquired:
         return JSONResponse(
             status_code=409,
-            content={"status": "busy", "jobs": ["cloud_text"], "target": lock_target, "state": state},
+            content={
+                "status": "busy",
+                "jobs": ["cloud_text"],
+                "target": lock_target,
+                "state": state,
+            },
         )
 
     async def _do_cloud_scan():
         try:
-            update_index_state(progress={"stage": "running", "current_modality": "cloud_text", "completed_modalities": []})
+            update_index_state(
+                progress={
+                    "stage": "running",
+                    "current_modality": "cloud_text",
+                    "completed_modalities": [],
+                }
+            )
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
                 None,
-                lambda: scan_cloud_text_index(remote_name=selected_remote, workers=workers),
+                lambda: scan_cloud_text_index(
+                    remote_name=selected_remote, workers=workers
+                ),
             )
             update_index_state(
                 progress={
@@ -3470,7 +4015,9 @@ def index_code_analyze(
     if not _is_path_allowed(root):
         raise HTTPException(403, "Path not allowed")
 
-    result = analyze_code_directory(root, threshold=threshold, max_scan_files=max_scan_files)
+    result = analyze_code_directory(
+        root, threshold=threshold, max_scan_files=max_scan_files
+    )
     report_storage_dir = STORAGE_DIR / "storage"
     report_storage_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_storage_dir / "code_index_analysis_latest.json"
@@ -3498,7 +4045,9 @@ def _resolve_repo_id_for_path(conn: sqlite3.Connection, path: Path) -> tuple[int
     if not analysis.get("ok"):
         raise HTTPException(400, analysis.get("error", "Unable to analyze directory"))
     repo_root = Path(str(analysis["project_root"])).resolve()
-    row = conn.execute("SELECT id FROM repositories WHERE root_path=?", (str(repo_root),)).fetchone()
+    row = conn.execute(
+        "SELECT id FROM repositories WHERE root_path=?", (str(repo_root),)
+    ).fetchone()
     if not row:
         raise HTTPException(404, "Repository not indexed in Layer 1 DB")
     return int(row["id"]), repo_root
@@ -3520,7 +4069,11 @@ def _fetch_layer1_payload(
         "SELECT language, COUNT(*) AS c FROM files WHERE repo_id=? GROUP BY language ORDER BY c DESC",
         (repo_id,),
     ).fetchall()
-    symbol_count = int(conn.execute("SELECT COUNT(*) FROM symbols WHERE repo_id=?", (repo_id,)).fetchone()[0])
+    symbol_count = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM symbols WHERE repo_id=?", (repo_id,)
+        ).fetchone()[0]
+    )
 
     files_query_limit = 1_000_000 if include_all else files_limit
     symbols_query_limit = 1_000_000 if include_all else symbols_limit
@@ -3588,7 +4141,9 @@ def _fetch_layer1_payload(
             "total_file_count": int(repo["total_file_count"]),
             "total_line_count": int(repo["total_line_count"]),
             "total_symbol_count": symbol_count,
-            "language_distribution": {str(r["language"] or "unknown"): int(r["c"]) for r in lang_rows},
+            "language_distribution": {
+                str(r["language"] or "unknown"): int(r["c"]) for r in lang_rows
+            },
             "directory_stats": json.loads(repo["directory_stats_json"] or "{}"),
         },
         "files": files,
@@ -3615,7 +4170,11 @@ def index_code_layer1_repo(path: str = Query(".")):
         "SELECT language, COUNT(*) AS c FROM files WHERE repo_id=? GROUP BY language ORDER BY c DESC",
         (repo_id,),
     ).fetchall()
-    symbol_count = int(conn.execute("SELECT COUNT(*) FROM symbols WHERE repo_id=?", (repo_id,)).fetchone()[0])
+    symbol_count = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM symbols WHERE repo_id=?", (repo_id,)
+        ).fetchone()[0]
+    )
     conn.close()
     return {
         "repo_id": repo_id,
@@ -3626,7 +4185,9 @@ def index_code_layer1_repo(path: str = Query(".")):
         "total_file_count": int(repo["total_file_count"]),
         "total_line_count": int(repo["total_line_count"]),
         "total_symbol_count": symbol_count,
-        "language_distribution": {str(r["language"] or "unknown"): int(r["c"]) for r in lang_rows},
+        "language_distribution": {
+            str(r["language"] or "unknown"): int(r["c"]) for r in lang_rows
+        },
         "directory_stats": json.loads(repo["directory_stats_json"] or "{}"),
         "db_path": str(CODE_INDEX_DB),
     }
@@ -3773,7 +4334,9 @@ def index_code_context(
     if not _is_path_allowed(root):
         raise HTTPException(403, "Path not allowed")
 
-    layer2 = analyze_code_directory(root, threshold=threshold, max_scan_files=max_scan_files)
+    layer2 = analyze_code_directory(
+        root, threshold=threshold, max_scan_files=max_scan_files
+    )
     if not layer2.get("ok"):
         raise HTTPException(500, layer2.get("error", "code analysis failed"))
 
@@ -3819,7 +4382,9 @@ def index_code_context(
     }
 
 
-def _recent_changes_payload(repo_root: Path, recent_days: int = 7, limit: int = 20) -> dict[str, Any]:
+def _recent_changes_payload(
+    repo_root: Path, recent_days: int = 7, limit: int = 20
+) -> dict[str, Any]:
     _init_code_index_db()
     conn = _code_db_conn()
     cutoff_ts = time.time() - (max(1, recent_days) * 86400)
@@ -3948,13 +4513,17 @@ def get_codebase_index_api(
         }
         for r in ext_rows
     ]
-    recent = _recent_changes_payload(repo_root, recent_days=recent_days, limit=recent_limit)
+    recent = _recent_changes_payload(
+        repo_root, recent_days=recent_days, limit=recent_limit
+    )
     structure = {
         "file_count": layer1["repo"]["total_file_count"],
         "line_count": layer1["repo"]["total_line_count"],
         "languages": layer1["repo"]["language_distribution"],
         "directories": layer1["repo"]["directory_stats"],
-        "entry_points": [r["relative_path"] for r in pf_rows if int(r["is_entry_point"] or 0) == 1][:100],
+        "entry_points": [
+            r["relative_path"] for r in pf_rows if int(r["is_entry_point"] or 0) == 1
+        ][:100],
         "test_file_count": sum(1 for r in pf_rows if int(r["is_test_file"] or 0) == 1),
     }
 
@@ -4018,10 +4587,20 @@ def get_module_detail_api(
                 "is_entry_point": bool(int(file_row["is_entry_point"] or 0)),
                 "is_test_file": bool(int(file_row["is_test_file"] or 0)),
                 "is_config_file": bool(int(file_row["is_config_file"] or 0)),
-                "module_docstring": imports_row["module_docstring"] if imports_row else None,
+                "module_docstring": (
+                    imports_row["module_docstring"] if imports_row else None
+                ),
                 "imports": {
-                    "external": json.loads(imports_row["external_imports_json"] or "[]") if imports_row else [],
-                    "internal": json.loads(imports_row["internal_imports_json"] or "[]") if imports_row else [],
+                    "external": (
+                        json.loads(imports_row["external_imports_json"] or "[]")
+                        if imports_row
+                        else []
+                    ),
+                    "internal": (
+                        json.loads(imports_row["internal_imports_json"] or "[]")
+                        if imports_row
+                        else []
+                    ),
                 },
                 "symbols": [
                     {
@@ -4039,7 +4618,12 @@ def get_module_detail_api(
             }
         )
     conn.close()
-    return {"ok": True, "repo_path": str(repo_root), "count": len(modules), "modules": modules}
+    return {
+        "ok": True,
+        "repo_path": str(repo_root),
+        "count": len(modules),
+        "modules": modules,
+    }
 
 
 @app.get("/index/code/get_file_content")
@@ -4096,7 +4680,9 @@ def _code_query_tokens(query: str) -> list[str]:
     return out
 
 
-def _split_code_chunks_by_lines(text: str, chunk_lines: int, chunk_overlap: int) -> list[dict[str, Any]]:
+def _split_code_chunks_by_lines(
+    text: str, chunk_lines: int, chunk_overlap: int
+) -> list[dict[str, Any]]:
     lines = text.splitlines()
     if not lines:
         return []
@@ -4129,7 +4715,9 @@ def _split_code_chunks_by_lines(text: str, chunk_lines: int, chunk_overlap: int)
     return out
 
 
-def _encode_code_chunk_id(rel_path: str, chunk_index: int, chunk_lines: int, chunk_overlap: int) -> str:
+def _encode_code_chunk_id(
+    rel_path: str, chunk_index: int, chunk_lines: int, chunk_overlap: int
+) -> str:
     payload = {
         "p": rel_path.replace("\\", "/"),
         "idx": int(chunk_index),
@@ -4140,7 +4728,9 @@ def _encode_code_chunk_id(rel_path: str, chunk_index: int, chunk_lines: int, chu
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def _score_code_chunk(query: str, tokens: list[str], rel_path: str, chunk_text: str, base_score: float) -> tuple[float, list[str]]:
+def _score_code_chunk(
+    query: str, tokens: list[str], rel_path: str, chunk_text: str, base_score: float
+) -> tuple[float, list[str]]:
     q = (query or "").strip().lower()
     rel_l = rel_path.lower()
     txt_l = chunk_text.lower()
@@ -4175,7 +4765,9 @@ def _candidate_code_files_for_query(
     scored: dict[str, dict[str, Any]] = {}
     tok_slice = tokens[:8]
 
-    def _upsert(file_path: str, rel_path: str, line_count: int, delta: float, reason: str) -> None:
+    def _upsert(
+        file_path: str, rel_path: str, line_count: int, delta: float, reason: str
+    ) -> None:
         key = str(file_path)
         existing = scored.get(key)
         if existing is None:
@@ -4296,7 +4888,9 @@ def search_code_chunks_api(
     conn = _code_db_conn()
     _repo_id, repo_root = _resolve_repo_id_for_path(conn, root)
     tokens = _code_query_tokens(q)
-    candidates = _candidate_code_files_for_query(conn, repo_root, tokens, bounded_candidate_files)
+    candidates = _candidate_code_files_for_query(
+        conn, repo_root, tokens, bounded_candidate_files
+    )
     conn.close()
 
     merged_rows: dict[tuple[str, int], dict[str, Any]] = {}
@@ -4329,11 +4923,15 @@ def search_code_chunks_api(
             merged_rows[key] = row
             return
 
-        existing["lexical_score"] = max(float(existing.get("lexical_score", 0.0)), float(lexical_score))
-        existing["semantic_score"] = max(float(existing.get("semantic_score", 0.0)), float(semantic_score))
-        existing["score"] = (float(lexical_weight) * float(existing["lexical_score"])) + (
-            float(semantic_weight) * float(existing["semantic_score"])
+        existing["lexical_score"] = max(
+            float(existing.get("lexical_score", 0.0)), float(lexical_score)
         )
+        existing["semantic_score"] = max(
+            float(existing.get("semantic_score", 0.0)), float(semantic_score)
+        )
+        existing["score"] = (
+            float(lexical_weight) * float(existing["lexical_score"])
+        ) + (float(semantic_weight) * float(existing["semantic_score"]))
         token_set = set(existing.get("matched_tokens", []))
         token_set.update(matched_tokens)
         existing["matched_tokens"] = sorted(token_set)
@@ -4379,7 +4977,11 @@ def search_code_chunks_api(
             )
             if score <= 0.0:
                 continue
-            if not matched and q.lower() not in str(ch["chunk"]).lower() and q.lower() not in rel_path.lower():
+            if (
+                not matched
+                and q.lower() not in str(ch["chunk"]).lower()
+                and q.lower() not in rel_path.lower()
+            ):
                 continue
             text = str(ch["chunk"])
             if len(text) > bounded_max_chars:
@@ -4418,7 +5020,10 @@ def search_code_chunks_api(
                 top_k=max(bounded_semantic_candidates, bounded_top_k * 20),
             )
             if ann_hits:
-                hit_by_id = {int(h["chunk_id"]): float(h.get("semantic_score", 0.0)) for h in ann_hits}
+                hit_by_id = {
+                    int(h["chunk_id"]): float(h.get("semantic_score", 0.0))
+                    for h in ann_hits
+                }
                 ids = list(hit_by_id.keys())
                 rows: list[sqlite3.Row] = []
                 conn = _code_db_conn()
@@ -4466,7 +5071,11 @@ def search_code_chunks_api(
                         chunk_text=raw_chunk,
                         base_score=0.0,
                     )
-                    if not matched and q.lower() not in raw_chunk.lower() and q.lower() not in rel_path.lower():
+                    if (
+                        not matched
+                        and q.lower() not in raw_chunk.lower()
+                        and q.lower() not in rel_path.lower()
+                    ):
                         continue
                     text = raw_chunk
                     if len(text) > bounded_max_chars:
@@ -4525,6 +5134,7 @@ def search_code_chunks_api(
         "results": deduped,
     }
 
+
 @app.get("/image/index/status")
 def image_index_status():
     indexed_images = 0
@@ -4541,7 +5151,11 @@ def image_index_status():
 
     try:
         from image_search_implementation_v2.annoy_store import get_annoy_status
-        from image_search_implementation_v2.db import count_images, count_ocr_images, init_db
+        from image_search_implementation_v2.db import (
+            count_images,
+            count_ocr_images,
+            init_db,
+        )
 
         init_db()
         indexed_images = int(count_images())
@@ -4551,7 +5165,9 @@ def image_index_status():
         status = "degraded"
         capabilities["error"] = str(e)
 
-    ocr_coverage = float(indexed_images_with_ocr / indexed_images) if indexed_images else 0.0
+    ocr_coverage = (
+        float(indexed_images_with_ocr / indexed_images) if indexed_images else 0.0
+    )
     return {
         "status": status,
         "engine": "annoy_sqlite_ocr",
@@ -4572,8 +5188,8 @@ async def prewarm_llm():
     async with rm.llm_context():
         return {
             "status": "ok",
-            "note":   "llama-server warm and resident",
-            "pid":    rm._llm_proc.pid if rm._llm_proc else None,
+            "note": "llama-server warm and resident",
+            "pid": rm._llm_proc.pid if rm._llm_proc else None,
         }
 
 
@@ -4594,8 +5210,11 @@ async def force_switch_llm():
     if rm._switch_lock.locked():
         return {"status": "busy", "note": "switch already in progress"}
     async with rm.llm_context():
-        return {"status": "ok", "resource_state": rm._state,
-                "pid": rm._llm_proc.pid if rm._llm_proc else None}
+        return {
+            "status": "ok",
+            "resource_state": rm._state,
+            "pid": rm._llm_proc.pid if rm._llm_proc else None,
+        }
 
 
 @app.post("/admin/force-switch/embed")
@@ -4616,7 +5235,9 @@ def get_file(path: str = Query(...)):
     if not _is_path_allowed(p):
         raise HTTPException(403, "Path not allowed")
     return FileResponse(
-        path=p, filename=p.name, media_type=None,
+        path=p,
+        filename=p.name,
+        media_type=None,
         headers={"Content-Disposition": f'inline; filename="{p.name}"'},
     )
 
@@ -4661,8 +5282,8 @@ def list_files(
 @app.post("/files/preflight")
 def preflight_file_add(
     relative_dir: str = Body(..., embed=True),
-    filename:     str = Body(..., embed=True),
-    sha256:       str = Body(..., embed=True),
+    filename: str = Body(..., embed=True),
+    sha256: str = Body(..., embed=True),
 ):
     target_dir = (ORGANIZED_ROOT / relative_dir).resolve()
     if ORGANIZED_ROOT not in target_dir.parents and target_dir != ORGANIZED_ROOT:
@@ -4687,8 +5308,8 @@ def recent_activity():
 
 @app.post("/thumbnails/fetch")
 def fetch_thumbnails(
-    category: str       = Body(...),
-    paths:    list[str] = Body(...),
+    category: str = Body(...),
+    paths: list[str] = Body(...),
 ):
     results = []
     for p in paths:
@@ -4697,33 +5318,38 @@ def fetch_thumbnails(
             continue
         data = read_thumbnail(src, category)
         if data:
-            results.append({
-                "path":      p,
-                "thumbnail": base64.b64encode(data).decode(),
-                "mime":      "image/jpeg",
-            })
+            results.append(
+                {
+                    "path": p,
+                    "thumbnail": base64.b64encode(data).decode(),
+                    "mime": "image/jpeg",
+                }
+            )
     return {"count": len(results), "thumbnails": results}
 
 
 @app.get("/storage/usage")
 def storage_usage():
     from config import get_storage_dir
+
     storage_path = str(get_storage_dir())
     if not os.path.exists(storage_path):
         raise HTTPException(404, "Storage not found")
-    s     = os.statvfs(storage_path)
+    s = os.statvfs(storage_path)
     total = s.f_frsize * s.f_blocks
-    free  = s.f_frsize * s.f_bavail
-    used  = total - free
+    free = s.f_frsize * s.f_bavail
+    used = total - free
     return {
-        "path":         storage_path,
-        "total_bytes":  total,
-        "used_bytes":   used,
-        "free_bytes":   free,
+        "path": storage_path,
+        "total_bytes": total,
+        "used_bytes": used,
+        "free_bytes": free,
         "used_percent": round(used / total * 100, 2) if total else 0.0,
     }
 
+
 # middleware protection definition
+
 
 @app.middleware("http")
 async def network_guard(request: Request, call_next):
@@ -4734,7 +5360,8 @@ async def network_guard(request: Request, call_next):
         "/health",
         "/network/status",
         "/wifi/scan",
-        "/wifi/connect","/configure-wifi"
+        "/wifi/connect",
+        "/configure-wifi",
     ]
 
     if path in allowed_paths:
@@ -4742,12 +5369,10 @@ async def network_guard(request: Request, call_next):
 
     # If not connected and not hotspot active → block
     if not NETWORK_STATE["connected"] and not NETWORK_STATE["hotspot_active"]:
-        return JSONResponse(
-            status_code=503,
-            content={"error": "Network not ready"}
-        )
+        return JSONResponse(status_code=503, content={"error": "Network not ready"})
 
     return await call_next(request)
+
 
 # network status endpoint
 @app.get("/network/status")
@@ -4756,13 +5381,16 @@ def network_status():
         "connected": NETWORK_STATE["connected"],
         "ssid": NETWORK_STATE["ssid"],
         "hotspot_active": NETWORK_STATE["hotspot_active"],
-        "hotspot_name": HOTSPOT_NAME if NETWORK_STATE["hotspot_active"] else None
+        "hotspot_name": HOTSPOT_NAME if NETWORK_STATE["hotspot_active"] else None,
     }
+
 
 @app.post("/configure-wifi")
 def configure_wifi(data: dict):
     if not NETWORK_CONTROL_SUPPORTED:
-        raise HTTPException(501, "WiFi configuration via nmcli is not supported on this host")
+        raise HTTPException(
+            501, "WiFi configuration via nmcli is not supported on this host"
+        )
 
     ssid = data.get("ssid")
     password = data.get("password")
@@ -4783,13 +5411,14 @@ def configure_wifi(data: dict):
         # 3️⃣ Connect
         subprocess.run(
             ["nmcli", "device", "wifi", "connect", ssid, "password", password],
-            check=True
+            check=True,
         )
 
         return {"status": "connected"}
 
     except subprocess.CalledProcessError:
         raise HTTPException(500, "Failed to connect to WiFi")
+
 
 @app.post("/storage/init")
 def init_storage(storage_type: str):
@@ -4808,8 +5437,9 @@ def poll_storage(session_id: str):
     return {
         "status": session["status"],
         "verification_url": session["verification_url"],
-        "user_code": session["user_code"]
+        "user_code": session["user_code"],
     }
+
 
 @app.get("/storage/status")
 def storage_status(remote_name: str):
@@ -4826,6 +5456,7 @@ def sync_start(remote_name: str):
 def sync_status(job_id: int):
     return get_job_status(job_id)
 
+
 @app.post("/storage/finalize")
 def finalize_storage(session_id: str, remote_name: str):
 
@@ -4838,25 +5469,17 @@ def finalize_storage(session_id: str, remote_name: str):
 
     # Create remote
     requests.post(
-        f"{RCLONE_URL}/config/create",
-        json={
-            "name": remote_name,
-            "type": "drive"
-        }
+        f"{RCLONE_URL}/config/create", json={"name": remote_name, "type": "drive"}
     )
 
     # Inject token
     requests.post(
         f"{RCLONE_URL}/config/update",
-        json={
-            "name": remote_name,
-            "parameters": {
-                "token": token_json
-            }
-        }
+        json={"name": remote_name, "parameters": {"token": token_json}},
     )
 
     return {"success": True}
+
 
 # ── Utility ───────────────────────────────────────────────────
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
@@ -4889,11 +5512,11 @@ def get_cpu_temp_c() -> float:
             continue
     return highest
 
+
 def get_current_wifi():
     try:
         result = subprocess.check_output(
-            ["nmcli", "-t", "-f", "ACTIVE,SSID", "dev", "wifi"],
-            text=True
+            ["nmcli", "-t", "-f", "ACTIVE,SSID", "dev", "wifi"], text=True
         )
         for line in result.strip().split("\n"):
             if line.startswith("yes:"):
@@ -4903,10 +5526,15 @@ def get_current_wifi():
     except Exception:
         return None
 
+
 def stop_hotspot():
-    subprocess.run(["nmcli", "connection", "down", HOTSPOT_NAME],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(
+        ["nmcli", "connection", "down", HOTSPOT_NAME],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     NETWORK_STATE["hotspot_active"] = False
+
 
 def initialize_network():
     print("🔍 Checking network state on startup...")
@@ -4924,11 +5552,12 @@ def initialize_network():
         NETWORK_STATE["ssid"] = None
         start_hotspot()
 
+
 def is_connected():
     try:
         result = subprocess.check_output(
-            ["nmcli", "-t", "-f", "GENERAL.STATE", "device","show", WIFI_INTERFACE],
-            text=True
+            ["nmcli", "-t", "-f", "GENERAL.STATE", "device", "show", WIFI_INTERFACE],
+            text=True,
         ).strip()
         if result.startswith("GENERAL.STATE:100"):
             return True
@@ -4938,48 +5567,88 @@ def is_connected():
         print("Network check failed:", e)
         return False
 
+
 def stop_system_dnsmasq():
     if shutil.which("systemctl") is None:
         return
-    subprocess.run(["sudo", "systemctl", "stop", "dnsmasq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(
+        ["sudo", "systemctl", "stop", "dnsmasq"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
 
 def start_hotspot():
     print("⚡ Starting Radxa Hotspot...")
 
-    subprocess.run(["nmcli", "connection", "delete", HOTSPOT_NAME], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(
+        ["nmcli", "connection", "delete", HOTSPOT_NAME],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
-    subprocess.run([
-        "nmcli", "connection", "add",
-        "type", "wifi",
-        "ifname", WIFI_INTERFACE,
-        "mode", "ap",
-        "con-name", HOTSPOT_NAME,
-        "ssid", HOTSPOT_SSID
-    ])
+    subprocess.run(
+        [
+            "nmcli",
+            "connection",
+            "add",
+            "type",
+            "wifi",
+            "ifname",
+            WIFI_INTERFACE,
+            "mode",
+            "ap",
+            "con-name",
+            HOTSPOT_NAME,
+            "ssid",
+            HOTSPOT_SSID,
+        ]
+    )
 
-    subprocess.run(["nmcli", "connection", "modify", HOTSPOT_NAME,
-                    "802-11-wireless.band", "bg"])
+    subprocess.run(
+        ["nmcli", "connection", "modify", HOTSPOT_NAME, "802-11-wireless.band", "bg"]
+    )
 
-    subprocess.run(["nmcli", "connection", "modify", HOTSPOT_NAME,
-                    "802-11-wireless-security.key-mgmt", "wpa-psk"])
+    subprocess.run(
+        [
+            "nmcli",
+            "connection",
+            "modify",
+            HOTSPOT_NAME,
+            "802-11-wireless-security.key-mgmt",
+            "wpa-psk",
+        ]
+    )
 
-    subprocess.run(["nmcli", "connection", "modify", HOTSPOT_NAME,
-                    "802-11-wireless-security.psk", HOTSPOT_PASSWORD])
+    subprocess.run(
+        [
+            "nmcli",
+            "connection",
+            "modify",
+            HOTSPOT_NAME,
+            "802-11-wireless-security.psk",
+            HOTSPOT_PASSWORD,
+        ]
+    )
 
-    subprocess.run(["nmcli", "connection", "modify", HOTSPOT_NAME,
-                    "ipv4.method", "shared"])
+    subprocess.run(
+        ["nmcli", "connection", "modify", HOTSPOT_NAME, "ipv4.method", "shared"]
+    )
 
-    subprocess.run(["nmcli", "connection", "modify", HOTSPOT_NAME,
-                    "ipv4.addresses", HOTSPOT_IP])
+    subprocess.run(
+        ["nmcli", "connection", "modify", HOTSPOT_NAME, "ipv4.addresses", HOTSPOT_IP]
+    )
 
-    subprocess.run(["nmcli", "connection", "modify", HOTSPOT_NAME,
-                    "ipv6.method", "ignore"])
+    subprocess.run(
+        ["nmcli", "connection", "modify", HOTSPOT_NAME, "ipv6.method", "ignore"]
+    )
 
     subprocess.run(["nmcli", "connection", "up", HOTSPOT_NAME])
 
     time.sleep(3)
 
     print("✅ Hotspot active at 10.99.0.1")
+
 
 def network_bootstrap():
     print("checking network state on startup...")

@@ -2,9 +2,68 @@ from __future__ import annotations
 
 import time
 import sqlite3
+import sys
+import types
+import importlib
 from pathlib import Path
 
-import cli.commands.status as status
+
+def _install_textual_stub() -> None:
+    if "textual" in sys.modules:
+        return
+
+    textual = types.ModuleType("textual")
+    app_mod = types.ModuleType("textual.app")
+    binding_mod = types.ModuleType("textual.binding")
+    containers_mod = types.ModuleType("textual.containers")
+    widgets_mod = types.ModuleType("textual.widgets")
+    widget_mod = types.ModuleType("textual.widget")
+
+    class _Base:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class _App(_Base):
+        @classmethod
+        def __class_getitem__(cls, _item):
+            return cls
+
+    class _Binding(_Base):
+        pass
+
+    class _ComposeResult:
+        pass
+
+    app_mod.App = _App
+    app_mod.ComposeResult = _ComposeResult
+    binding_mod.Binding = _Binding
+
+    for name in ("Horizontal", "Vertical", "ScrollableContainer", "VerticalScroll"):
+        setattr(containers_mod, name, _Base)
+
+    for name in (
+        "Label",
+        "Static",
+        "DataTable",
+        "Rule",
+        "Footer",
+        "Header",
+        "Sparkline",
+    ):
+        setattr(widgets_mod, name, _Base)
+
+    widget_mod.Widget = _Base
+
+    sys.modules["textual"] = textual
+    sys.modules["textual.app"] = app_mod
+    sys.modules["textual.binding"] = binding_mod
+    sys.modules["textual.containers"] = containers_mod
+    sys.modules["textual.widgets"] = widgets_mod
+    sys.modules["textual.widget"] = widget_mod
+
+
+_install_textual_stub()
+status = importlib.import_module("cli.commands.status")
 
 
 def _make_text_db(path: Path) -> None:

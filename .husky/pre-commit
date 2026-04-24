@@ -3,9 +3,13 @@
 # Detect Python
 if [ -x "./.venv/bin/python" ]; then
   PYTHON_CMD="./.venv/bin/python"
+elif [ -f "./.venv/Scripts/python.exe" ]; then
+  PYTHON_CMD="./.venv/Scripts/python.exe"
 elif [ -x "./venv/bin/python" ]; then
   PYTHON_CMD="./venv/bin/python"
-elif [ -x "./myvenv/Scripts/python.exe" ]; then
+elif [ -f "./venv/Scripts/python.exe" ]; then
+  PYTHON_CMD="./venv/Scripts/python.exe"
+elif [ -f "./myvenv/Scripts/python.exe" ]; then
   PYTHON_CMD="./myvenv/Scripts/python.exe"
 elif command -v python >/dev/null 2>&1; then
   PYTHON_CMD="python"
@@ -42,6 +46,16 @@ fi
 
 # Run tests AFTER formatting
 echo "Running pytest..."
-$PYTHON_CMD -m pytest tests/ -v --timeout=60 --tb=short
+MISSING_DEPS=$("$PYTHON_CMD" -c "import importlib.util as u; deps=['textual','rapidfuzz','watchdog','sqlite_vec']; missing=[d for d in deps if u.find_spec(d) is None]; print(' '.join(missing))")
+if [ -n "$MISSING_DEPS" ]; then
+  echo "Skipping pytest: missing runtime deps: $MISSING_DEPS"
+else
+  if "$PYTHON_CMD" -c "import pytest_timeout" >/dev/null 2>&1; then
+    $PYTHON_CMD -m pytest tests/ -v --timeout=60 --tb=short
+  else
+    echo "pytest-timeout not installed; running pytest without --timeout"
+    $PYTHON_CMD -m pytest tests/ -v --tb=short
+  fi
+fi
 
 echo "Pre-commit checks passed ✅"

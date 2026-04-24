@@ -129,7 +129,7 @@ If that fails, the package is not installed in the Python environment your shell
 
 ## BEIR Benchmark (SciFact)
 
-You can benchmark the current text retrieval stack on a BEIR dataset (starting with SciFact) without touching your existing index data.
+You can benchmark the current text retrieval stack on a BEIR dataset (starting with SciFact) without touching your existing index data. More datasets and more benchmarking criterias will be added soon.
 
 Install optional benchmark dependency:
 
