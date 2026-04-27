@@ -125,7 +125,8 @@ Run:
 contextcore --help
 ```
 
-If that fails, the package is not installed in the Python environment your shell is using.
+If that fails, the package is not installed in the Python environment your shell is using. 
+you can raise a bug otherwise
 
 ## BEIR Benchmark (SciFact)
 
