@@ -80,7 +80,7 @@ That's it. ContextCore indexes your files, registers with your AI tools, and run
 - Enough disk space for Python packages and model files
 
 Optional but important:
-- `ffmpeg` for video indexing
+- `ffmpeg` for video indexing, can be improved
 - Claude Desktop or another MCP-capable tool if you want interactive AI integration
 
 ## What ContextCore Does
