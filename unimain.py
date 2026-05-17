@@ -834,6 +834,30 @@ def scan_cloud_text_index(remote_name: str | None = None, workers: int = 3):
         return {"status": "error"}
 
 
+def scan_connector_sync(provider: str, api_key: str | None = None, env_var: str | None = None):
+    try:
+        from Connectors.Connectors import sync_connector, sync_connector_from_env
+
+        if api_key and api_key.strip():
+            result = sync_connector(provider=provider, api_key=api_key.strip())
+        else:
+            result = sync_connector_from_env(provider=provider, env_var=env_var)
+        return {
+            "status": "ok",
+            "provider": result.provider,
+            "account_id": result.account_id,
+            "discovered": result.discovered,
+            "fetched": result.fetched,
+            "updated": result.updated,
+            "unchanged": result.unchanged,
+            "failed": result.failed,
+            "warnings": result.warnings,
+        }
+    except Exception as exc:
+        traceback.print_exc()
+        return {"status": "error", "error": str(exc)}
+
+
 def scan_image_index(target_dir: str | Path | None = None):
     if importlib.util.find_spec("transformers") is None:
         return {
@@ -3282,11 +3306,24 @@ def run_text_search(
         except Exception:
             cloud_results = []
 
+        try:
+            from Connectors.store import search_connector_documents
+
+            connector_results = search_connector_documents(
+                query=query,
+                top_k=top_k,
+                exclude_sources=exclude_sources,
+            )
+        except Exception:
+            connector_results = []
+
         merged = []
         if isinstance(local_results, list):
             merged.extend(local_results)
         if isinstance(cloud_results, list):
             merged.extend(cloud_results)
+        if isinstance(connector_results, list):
+            merged.extend(connector_results)
 
         merged.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
         return merged[:top_k]
@@ -4001,6 +4038,30 @@ async def index_cloud_scan(
 
     asyncio.ensure_future(_do_cloud_scan())
     return {"status": "accepted", "jobs": ["cloud_text"], "target": lock_target}
+
+
+@app.post("/index/connectors/sync")
+async def index_connectors_sync(
+    provider: str = Query(..., min_length=2),
+    env_var: str | None = Query(None),
+    api_key: str | None = Body(None, embed=True),
+):
+    normalized_provider = provider.strip().lower()
+    if normalized_provider != "notion":
+        raise HTTPException(400, "unsupported connector provider")
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: scan_connector_sync(
+            provider=normalized_provider,
+            api_key=api_key,
+            env_var=env_var,
+        ),
+    )
+    if result.get("status") != "ok":
+        raise HTTPException(500, result.get("error", "connector sync failed"))
+    return result
 
 
 @app.post("/index/code/analyze")

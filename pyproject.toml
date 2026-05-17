@@ -81,6 +81,7 @@ py-modules = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = [
+    "Connectors*",
     "activity*",
     "audio_search_implementation_v2*",
     "cli*",

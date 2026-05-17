@@ -895,6 +895,32 @@ def fetch_content(
     - Text/audio: indexed textual content.
     - Image: OCR text and metadata when available.
     """
+    if "://" in (path or "") and not str(path).lower().startswith("file://"):
+        try:
+            from Connectors.store import fetch_document_by_uri
+
+            doc = fetch_document_by_uri(path)
+            if not doc:
+                return {"ok": False, "error": "document_not_found", "path": path}
+            return {
+                "ok": True,
+                "path": path,
+                "modality": "text",
+                "title": doc.get("title"),
+                "provider": doc.get("provider"),
+                "url": doc.get("url"),
+                "updated_at": doc.get("updated_at"),
+                "content": doc.get("content", ""),
+                "metadata": doc.get("metadata", {}),
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": "connector_fetch_failed",
+                "path": path,
+                "message": str(exc),
+            }
+
     p = Path(path).expanduser().resolve()
     if not p.exists():
         return {"ok": False, "error": "file_not_found", "path": str(p)}
@@ -1387,6 +1413,16 @@ def list_sources() -> dict[str, Any]:
     doc_text_total = max(0, text_total - audio_total)
     image_total = _safe_sql_count(image_db, "SELECT COUNT(*) FROM images")
     video_total = _safe_sql_count(video_db, "SELECT COUNT(*) FROM videos")
+    connector_total = 0
+    connector_counts: dict[str, int] = {}
+    try:
+        from Connectors.store import count_connector_documents, get_provider_counts
+
+        connector_total = int(count_connector_documents())
+        connector_counts = get_provider_counts()
+    except Exception:
+        connector_total = 0
+        connector_counts = {}
 
     image_status = _request_json("GET", "/image/index/status", timeout=10)
     image_index_status: dict[str, Any] = {}
@@ -1406,6 +1442,7 @@ def list_sources() -> dict[str, Any]:
                 "filesystem": True,
                 "annoy": semantic_available,
                 "rclone": True,
+                "providers": connector_counts,
             },
         },
         "indexed_counts": {
@@ -1413,7 +1450,8 @@ def list_sources() -> dict[str, Any]:
             "audio": audio_total,
             "image": image_total,
             "video": video_total,
-            "total": doc_text_total + audio_total + image_total + video_total,
+            "connectors": connector_total,
+            "total": doc_text_total + audio_total + image_total + video_total + connector_total,
         },
         "backend": {
             "base_url": BACKEND_BASE_URL,
@@ -1432,6 +1470,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
 
