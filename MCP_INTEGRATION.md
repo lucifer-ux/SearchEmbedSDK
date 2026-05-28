@@ -16,6 +16,7 @@ uvicorn unimain:app --host 127.0.0.1 --port 8000
 
 ```powershell
 cd SearchEmbedSDK
+<!-- to be added as proper contextcore  -->
 python mcp_server.py
 ```
 
