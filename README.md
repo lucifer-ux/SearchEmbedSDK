@@ -72,6 +72,35 @@ Gif is sped up to skip the installation parts.
 
 That's it. ContextCore indexes your files, registers with your AI tools, and runs in the background. No config files to edit.
 
+## Optional Turso Storage for Text Search
+
+ContextCore is local-first by default. If you want `text_search_implementation_v2` to store and fetch its text index from Turso instead of the local SQLite file, configure Turso with environment variables or a `.env` file.
+
+This currently applies only to text search storage. Image, audio, video, and code indexes still use their existing storage paths.
+
+Create a `.env` file in the ContextCore repo root, your current working directory, or `~/.contextcore/.env`:
+
+```bash
+TURSO_DATABASE_URL="libsql://..."
+TURSO_AUTH_TOKEN="..."
+CONTEXTCORE_TEXT_STORAGE_BACKEND="turso"
+```
+
+You can also point ContextCore at a specific env file:
+
+```bash
+export CONTEXTCORE_ENV_FILE="/path/to/contextcore.env"
+```
+
+Backend selection rules for text search:
+
+- `CONTEXTCORE_TEXT_STORAGE_BACKEND=turso` or `libsql` forces Turso.
+- `CONTEXTCORE_TEXT_STORAGE_BACKEND=sqlite` or `local` forces local SQLite.
+- If no backend is set but `TURSO_DATABASE_URL` is present, text search uses Turso.
+- If no backend and no Turso URL are set, text search uses local SQLite under `CONTEXTCORE_STORAGE_DIR`.
+
+The `.env` loader accepts both `KEY=value` and `export KEY=value` lines. Real shell environment variables take precedence over `.env` values.
+
 ## Prerequisites
 
 - Python 3.10+

@@ -27,6 +27,7 @@ dependencies = [
     "uvicorn[standard]",
     "mcp[cli]",
     "sqlite-vec",
+    "libsql",
     "pypdf",
     "typer",
     "rich",

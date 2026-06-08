@@ -15,10 +15,52 @@ ROOT = Path(__file__).parent.resolve()
 # YAML loader (optional dependency — pure-Python fallback if PyYAML absent)
 # ---------------------------------------------------------------------------
 _config_cache: Optional[Dict[str, Any]] = None
+_env_loaded = False
+
+
+def _find_env_files() -> list[Path]:
+    env_path = os.getenv("CONTEXTCORE_ENV_FILE")
+    if env_path:
+        return [Path(env_path).expanduser().resolve()]
+    return [
+        ROOT / ".env",
+        Path.cwd() / ".env",
+        Path.home() / ".contextcore" / ".env",
+    ]
+
+
+def load_env_file() -> None:
+    """Load simple KEY=VALUE entries from .env without overriding real env."""
+    global _env_loaded
+    if _env_loaded:
+        return
+    _env_loaded = True
+
+    for path in _find_env_files():
+        if not path.is_file():
+            continue
+        try:
+            for raw_line in path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export ") :].strip()
+                if "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                if not key or not key.replace("_", "").isalnum():
+                    continue
+                value = value.strip().strip("'\"")
+                os.environ.setdefault(key, value)
+        except Exception:
+            continue
 
 
 def _find_config_file() -> Optional[Path]:
     """Search for config in env override, user config, project root, then CWD."""
+    load_env_file()
     env_path = os.getenv("CONTEXTCORE_CONFIG")
     if env_path:
         p = Path(env_path).expanduser().resolve()
@@ -135,6 +177,7 @@ def get_video_directories() -> list[Path]:
     Return video watch directories.
     Precedence: CONTEXTCORE_VIDEO_DIR env -> contextcore.yaml -> CWD.
     """
+    load_env_file()
     env = os.getenv("CONTEXTCORE_VIDEO_DIR")
     if env:
         return [Path(env).expanduser().resolve()]
@@ -155,6 +198,7 @@ def get_audio_directories() -> list[Path]:
     Return audio watch directories.
     Precedence: contextcore.yaml → CONTEXTCORE_AUDIO_DIR env → CWD.
     """
+    load_env_file()
     cfg = _load_config()
     yaml_dirs = cfg.get("audio_directories")
     if yaml_dirs:
@@ -175,6 +219,7 @@ def get_image_directory() -> Path:
     Return image root directory.
     Precedence: CONTEXTCORE_IMAGE_DIR env -> contextcore.yaml -> CWD.
     """
+    load_env_file()
     env = os.getenv("CONTEXTCORE_IMAGE_DIR")
     if env:
         return Path(env).expanduser().resolve()
@@ -192,6 +237,7 @@ def get_organized_root() -> Path:
     Return the organized-files root.
     Precedence: contextcore.yaml → CONTEXTCORE_ORGANIZED_ROOT env → CWD.
     """
+    load_env_file()
     cfg = _load_config()
     yaml_dir = cfg.get("organized_root")
     if yaml_dir:
@@ -213,6 +259,7 @@ def get_storage_dir() -> Path:
     Return the global storage directory where index.db lives.
     Precedence: CONTEXTCORE_STORAGE_DIR env -> contextcore.yaml -> ~/.contextcore.
     """
+    load_env_file()
     env = os.getenv("CONTEXTCORE_STORAGE_DIR")
     if env:
         return Path(env).expanduser().resolve()
@@ -226,6 +273,7 @@ def get_storage_dir() -> Path:
 
 
 def get_storage_path() -> Path:
+    load_env_file()
     cfg = _load_config()
     yaml_path = cfg.get("storage_path")
     if yaml_path:

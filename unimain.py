@@ -1006,38 +1006,16 @@ def _delete_text_file(path: str) -> bool:
     """Delete text file entry and its full-text search index."""
     try:
         from text_search_implementation_v2.db import (
+            delete_file_by_path,
             delete_file_by_path_category,
-            get_conn,
-            _table_exists,
         )
 
         # Try common categories
         for category in [None, "text", "code_comment", "transcript"]:
             try:
                 if category is None:
-                    # Try by path without category filter
-                    conn = get_conn()
-                    row = conn.execute(
-                        "SELECT id FROM files WHERE path = ?", (path,)
-                    ).fetchone()
-                    if row:
-                        file_id = row["id"]
-                        conn.execute(
-                            "DELETE FROM files_fts WHERE rowid = ?", (file_id,)
-                        )
-                        try:
-                            if _table_exists(conn, "files_fts_trigram"):
-                                conn.execute(
-                                    "DELETE FROM files_fts_trigram WHERE rowid = ?",
-                                    (file_id,),
-                                )
-                        except Exception:
-                            pass
-                        conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
-                        conn.commit()
-                        conn.close()
+                    if delete_file_by_path(path):
                         return True
-                    conn.close()
                 else:
                     if delete_file_by_path_category(path, category):
                         return True

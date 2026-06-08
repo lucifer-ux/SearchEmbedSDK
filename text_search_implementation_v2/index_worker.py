@@ -2,7 +2,12 @@
 import argparse
 import os
 from pathlib import Path
-from text_search_implementation_v2.db import init_db, upsert_file, get_file_mtime, get_conn
+from text_search_implementation_v2.db import (
+    delete_files_under,
+    get_file_mtime,
+    init_db,
+    upsert_file,
+)
 from text_search_implementation_v2.extract import extract_text
 from text_search_implementation_v2.config import BASE_DIR, TEXT_FOLDERS
 
@@ -112,22 +117,7 @@ def _looks_like_code_directory(path: Path) -> bool:
 
 
 def _purge_text_rows_under(root: Path) -> int:
-    prefix = str(root.resolve())
-    removed = 0
-    conn = get_conn()
-    try:
-        with conn:
-            rows = conn.execute(
-                "SELECT id FROM files WHERE path LIKE ? AND LOWER(category) NOT IN ('audio', 'video_transcript')",
-                (f"{prefix}%",),
-            ).fetchall()
-            for row in rows:
-                conn.execute("DELETE FROM files_fts WHERE rowid = ?", (row["id"],))
-                conn.execute("DELETE FROM files WHERE id = ?", (row["id"],))
-            removed = len(rows)
-    finally:
-        conn.close()
-    return removed
+    return delete_files_under(root, excluded_categories=NON_TEXT_CATEGORIES)
 
 
 def index_one_file(p: Path):

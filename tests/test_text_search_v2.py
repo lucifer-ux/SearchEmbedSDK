@@ -7,6 +7,7 @@ import pytest
 
 def _reload_text_modules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("CONTEXTCORE_STORAGE_DIR", str(tmp_path))
+    monkeypatch.setenv("CONTEXTCORE_TEXT_STORAGE_BACKEND", "sqlite")
 
     import text_search_implementation_v2.db as db_mod
     import text_search_implementation_v2.search as search_mod
@@ -61,10 +62,10 @@ def test_query_routing_weights_clean_vs_noisy(monkeypatch: pytest.MonkeyPatch, t
         assert noisy[1] >= clean[1]
 
 
-def test_rrf_merge_is_deterministic():
-    from text_search_implementation_v2.search import TextSearchEngineV2
+def test_rrf_merge_is_deterministic(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    _, search_mod = _reload_text_modules(monkeypatch, tmp_path)
 
-    engine = TextSearchEngineV2()
+    engine = search_mod.TextSearchEngineV2()
     porter_rows = [_Row(id=1), _Row(id=2), _Row(id=3)]
     trigram_rows = [_Row(id=2), _Row(id=1), _Row(id=4)]
 
@@ -145,3 +146,45 @@ def test_retrieval_modes_return_rows(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         rows = engine.search("retrieval", top_k=3, include_metadata=True, retrieval_mode=mode)
         assert isinstance(rows, list)
         assert rows
+
+
+def test_turso_backend_selected_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.delenv("CONTEXTCORE_TEXT_STORAGE_BACKEND", raising=False)
+    monkeypatch.setenv("CONTEXTCORE_STORAGE_DIR", str(tmp_path))
+    monkeypatch.setenv("TURSO_DATABASE_URL", "libsql://example.turso.io")
+
+    import text_search_implementation_v2.db as db_mod
+
+    db_mod = importlib.reload(db_mod)
+    assert db_mod.using_turso()
+
+    monkeypatch.setenv("CONTEXTCORE_TEXT_STORAGE_BACKEND", "sqlite")
+    db_mod = importlib.reload(db_mod)
+    assert not db_mod.using_turso()
+
+
+def test_turso_backend_selected_from_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "TURSO_DATABASE_URL=libsql://dotenv-example.turso.io",
+                "TURSO_AUTH_TOKEN=dotenv-token",
+                "export CONTEXTCORE_TEXT_STORAGE_BACKEND=turso",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONTEXTCORE_ENV_FILE", str(env_file))
+    monkeypatch.delenv("TURSO_DATABASE_URL", raising=False)
+    monkeypatch.delenv("TURSO_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CONTEXTCORE_TEXT_STORAGE_BACKEND", raising=False)
+
+    import config as config_mod
+    import text_search_implementation_v2.db as db_mod
+
+    config_mod._env_loaded = False
+    config_mod = importlib.reload(config_mod)
+    db_mod = importlib.reload(db_mod)
+
+    assert db_mod.using_turso()

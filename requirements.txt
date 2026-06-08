@@ -14,6 +14,7 @@ mcp[cli]
 
 # Search / indexing
 sqlite-vec
+libsql
 watchdog
 pypdf
 numpy
