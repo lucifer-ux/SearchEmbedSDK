@@ -30,6 +30,7 @@ import requests
 from fastapi import FastAPI, Query, HTTPException, Body
 from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from activity.recent_sync import get_recent_syncs
 from activity.search_analytics import record_search_hits
 from index_controller.thumbnail_manager import read_thumbnail
@@ -3259,6 +3260,7 @@ def run_text_search(
     retrieval_mode: str = "contextcore_hybrid",
     max_context_tokens_per_result: int | None = None,
     max_chunks_per_doc: int = 1,
+    matter_id: str | None = None,
 ):
     try:
         local_results = get_text_engine().search(
@@ -3272,28 +3274,32 @@ def run_text_search(
             retrieval_mode=retrieval_mode,
             max_context_tokens_per_result=max_context_tokens_per_result,
             max_chunks_per_doc=max_chunks_per_doc,
+            matter_id=matter_id,
         )
-        try:
-            from cloud_text_search_implementation.search import search_cloud_text
+        cloud_results = []
+        connector_results = []
+        if matter_id is None:
+            try:
+                from cloud_text_search_implementation.search import search_cloud_text
 
-            cloud_results = search_cloud_text(
-                query=query,
-                top_k=top_k,
-                exclude_sources=exclude_sources,
-            )
-        except Exception:
-            cloud_results = []
+                cloud_results = search_cloud_text(
+                    query=query,
+                    top_k=top_k,
+                    exclude_sources=exclude_sources,
+                )
+            except Exception:
+                cloud_results = []
 
-        try:
-            from Connectors.store import search_connector_documents
+            try:
+                from Connectors.store import search_connector_documents
 
-            connector_results = search_connector_documents(
-                query=query,
-                top_k=top_k,
-                exclude_sources=exclude_sources,
-            )
-        except Exception:
-            connector_results = []
+                connector_results = search_connector_documents(
+                    query=query,
+                    top_k=top_k,
+                    exclude_sources=exclude_sources,
+                )
+            except Exception:
+                connector_results = []
 
         merged = []
         if isinstance(local_results, list):
@@ -3607,6 +3613,7 @@ async def unified_search(
     text_retrieval_mode: str = Query("contextcore_hybrid"),
     text_max_context_tokens_per_result: int | None = Query(None, ge=1, le=4000),
     text_max_chunks_per_doc: int = Query(1, ge=1, le=4),
+    text_matter_id: str | None = Query(None),
     exclude_sources: str | None = Query(None),
 ):
     """
@@ -3649,6 +3656,7 @@ async def unified_search(
                             text_retrieval_mode,
                             text_max_context_tokens_per_result,
                             text_max_chunks_per_doc,
+                            text_matter_id,
                         ),
                         timeout=8,
                     )
@@ -3735,6 +3743,107 @@ async def unified_search(
     except Exception:
         pass
     return out
+
+
+class TextUpsertRequest(BaseModel):
+    path: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1)
+    filename: str | None = None
+    category: str = "text"
+    matter_id: str | None = None
+    mtime: float | None = None
+
+
+@app.post("/text/upsert")
+def text_upsert(payload: TextUpsertRequest):
+    try:
+        from text_search_implementation_v2.db import get_file_record, init_db, upsert_file
+
+        init_db()
+        path = payload.path.strip()
+        filename = (payload.filename or Path(path).name or "document.txt").strip()
+        mtime = float(payload.mtime if payload.mtime is not None else time.time())
+        changed = upsert_file(
+            path=path,
+            filename=filename,
+            category=payload.category,
+            mtime=mtime,
+            content=payload.content,
+            matter_id=payload.matter_id,
+        )
+        record = get_file_record(path=path, matter_id=payload.matter_id)
+        return {
+            "ok": True,
+            "changed": bool(changed),
+            "file": {
+                "id": int(record["id"]) if record else None,
+                "path": path,
+                "filename": filename,
+                "category": payload.category,
+                "matter_id": payload.matter_id,
+                "mtime": mtime,
+            },
+        }
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/text/file-content")
+def text_file_content(
+    path: str | None = Query(None),
+    file_id: int | None = Query(None, ge=1),
+    matter_id: str | None = Query(None),
+    include_chunks: bool = Query(False),
+    chunk_chars: int = Query(900, ge=200, le=4000),
+    chunk_overlap: int = Query(120, ge=0, le=1000),
+):
+    try:
+        from text_search_implementation_v2.db import get_file_record, init_db
+
+        if path is None and file_id is None:
+            raise HTTPException(400, "path or file_id is required")
+
+        init_db()
+        record = get_file_record(path=path, file_id=file_id, matter_id=matter_id)
+        if not record:
+            raise HTTPException(404, "file_not_found")
+
+        out = {
+            "ok": True,
+            "file": {
+                "id": int(record["id"]),
+                "path": str(record["path"]),
+                "filename": str(record["filename"] or ""),
+                "category": str(record["category"] or ""),
+                "matter_id": record.get("matter_id"),
+                "mtime": record.get("mtime"),
+            },
+            "content": str(record.get("content") or ""),
+        }
+        if include_chunks:
+            engine = get_text_engine()
+            chunks = engine._split_chunks(out["content"], chunk_chars, chunk_overlap)
+            out["chunks"] = [
+                {
+                    "chunk": str(c["text"]),
+                    "chunk_id": engine._encode_chunk_id(
+                        int(record["id"]),
+                        int(c["index"]),
+                        chunk_chars,
+                        chunk_overlap,
+                    ),
+                    "chunk_index": int(c["index"]),
+                    "chunk_total": len(chunks),
+                    "start": int(c["start"]),
+                    "end": int(c["end"]),
+                }
+                for c in chunks
+            ]
+        return out
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 
 @app.get("/search/text/neighbors")

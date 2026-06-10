@@ -326,6 +326,7 @@ class TextSearchEngineV2:
         retrieval_mode: str = "contextcore_hybrid",
         max_context_tokens_per_result: int | None = None,
         max_chunks_per_doc: int = 1,
+        matter_id: str | None = None,
     ):
         if not query or not query.strip():
             return []
@@ -337,10 +338,22 @@ class TextSearchEngineV2:
 
         # 1) Exact filename path (chunk-consistent output)
         conn = get_conn()
-        row = conn.execute(
-            "SELECT id, path, filename, category, content FROM files WHERE LOWER(filename) = ? LIMIT 1",
-            (q_norm,),
-        ).fetchone()
+        if matter_id is not None:
+            row = conn.execute(
+                """
+                SELECT id, path, filename, category, matter_id, content
+                FROM files
+                WHERE LOWER(filename) = ? AND matter_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (q_norm, matter_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT id, path, filename, category, matter_id, content FROM files WHERE LOWER(filename) = ? LIMIT 1",
+                (q_norm,),
+            ).fetchone()
         conn.close()
 
         if row:
@@ -360,6 +373,7 @@ class TextSearchEngineV2:
                         item = {
                             "path": row["path"],
                             "category": row["category"],
+                            "matter_id": row["matter_id"],
                             "score": EXACT_FILENAME_BOOST,
                             "chunk": chunk_payload["chunk"],
                             "chunk_id": chunk_payload["chunk_id"],
@@ -398,7 +412,15 @@ class TextSearchEngineV2:
         # Fallback: keep previous fuzzy filename behavior if no lexical candidates.
         if not merged_scores and tokens:
             conn = get_conn()
-            all_files = conn.execute("SELECT id, path, filename, category FROM files").fetchall()
+            if matter_id is not None:
+                all_files = conn.execute(
+                    "SELECT id, path, filename, category, matter_id FROM files WHERE matter_id = ?",
+                    (matter_id,),
+                ).fetchall()
+            else:
+                all_files = conn.execute(
+                    "SELECT id, path, filename, category, matter_id FROM files"
+                ).fetchall()
             conn.close()
             results = []
             for row in all_files:
@@ -429,6 +451,7 @@ class TextSearchEngineV2:
                 item = {
                     "path": row["path"],
                     "category": row["category"],
+                    "matter_id": row["matter_id"],
                     "score": min(1.0, float(best_token_score) / 100.0),
                     "chunk": chunk_payload["chunk"],
                     "chunk_id": chunk_payload["chunk_id"],
@@ -463,6 +486,8 @@ class TextSearchEngineV2:
             meta = id_to_meta.get(fid)
             if not meta:
                 continue
+            if matter_id is not None and str(meta.get("matter_id") or "") != matter_id:
+                continue
             if meta["path"] in excluded:
                 continue
             if category_filter is not None and str(meta["category"]).lower() not in category_filter:
@@ -495,6 +520,7 @@ class TextSearchEngineV2:
             item = {
                 "path": meta["path"],
                 "category": meta["category"],
+                "matter_id": meta.get("matter_id"),
                 "score": float(base + fuzzy_boost),
                 "chunk": chunk_payload["chunk"],
                 "chunk_id": chunk_payload["chunk_id"],
@@ -551,6 +577,7 @@ class TextSearchEngineV2:
                 {
                     "path": meta["path"],
                     "category": meta["category"],
+                    "matter_id": meta.get("matter_id"),
                     "chunk": c["text"],
                     "chunk_id": self._encode_chunk_id(fid, c["index"], chunk_chars, chunk_overlap),
                     "chunk_index": c["index"],

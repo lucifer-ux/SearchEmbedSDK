@@ -155,6 +155,7 @@ def init_db():
                 path TEXT UNIQUE,
                 filename TEXT,
                 category TEXT,
+                matter_id TEXT,
                 mtime REAL,
                 content TEXT
             )
@@ -164,6 +165,9 @@ def init_db():
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(files)").fetchall()}
         if "content" not in cols:
             conn.execute("ALTER TABLE files ADD COLUMN content TEXT")
+        if "matter_id" not in cols:
+            conn.execute("ALTER TABLE files ADD COLUMN matter_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_files_matter_id ON files(matter_id)")
 
         if using_turso():
             _init_turso_fts(conn)
@@ -224,7 +228,14 @@ def trigram_supported() -> bool:
         conn.close()
 
 # helper to upsert file metadata and fts content
-def upsert_file(path: str, filename: str, category: str, mtime: float, content: str):
+def upsert_file(
+    path: str,
+    filename: str,
+    category: str,
+    mtime: float,
+    content: str,
+    matter_id: str | None = None,
+):
     conn = get_conn()
     with conn:
         row = conn.execute(
@@ -237,8 +248,8 @@ def upsert_file(path: str, filename: str, category: str, mtime: float, content: 
         if row:
             file_id = row["id"]
             conn.execute(
-                "UPDATE files SET filename = ?, category = ?, mtime = ?, content = ? WHERE id = ?",
-                (filename, category, mtime, content, file_id),
+                "UPDATE files SET filename = ?, category = ?, matter_id = ?, mtime = ?, content = ? WHERE id = ?",
+                (filename, category, matter_id, mtime, content, file_id),
             )
             if not using_turso():
                 conn.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
@@ -247,8 +258,8 @@ def upsert_file(path: str, filename: str, category: str, mtime: float, content: 
         else:
             file_id = None
             cur = conn.execute(
-                "INSERT OR IGNORE INTO files (path, filename, category, mtime, content) VALUES (?, ?, ?, ?, ?)",
-                (path, filename, category, mtime, content),
+                "INSERT OR IGNORE INTO files (path, filename, category, matter_id, mtime, content) VALUES (?, ?, ?, ?, ?, ?)",
+                (path, filename, category, matter_id, mtime, content),
             )
             file_id = getattr(cur, "lastrowid", None) or None
             if not file_id:
@@ -262,8 +273,8 @@ def upsert_file(path: str, filename: str, category: str, mtime: float, content: 
                     return False
                 file_id = row["id"]
                 conn.execute(
-                    "UPDATE files SET filename = ?, category = ?, mtime = ?, content = ? WHERE id = ?",
-                    (filename, category, mtime, content, file_id),
+                    "UPDATE files SET filename = ?, category = ?, matter_id = ?, mtime = ?, content = ? WHERE id = ?",
+                    (filename, category, matter_id, mtime, content, file_id),
                 )
                 if not using_turso():
                     conn.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
@@ -397,7 +408,10 @@ def get_file_metadata_by_ids(ids):
         return []
     conn = get_conn()
     placeholders = ",".join("?" for _ in ids)
-    cur = conn.execute(f"SELECT id, path, filename, category FROM files WHERE id IN ({placeholders})", ids)
+    cur = conn.execute(
+        f"SELECT id, path, filename, category, matter_id FROM files WHERE id IN ({placeholders})",
+        ids,
+    )
     rows = cur.fetchall()
     conn.close()
     return {r["id"]: dict(r) for r in rows}
@@ -412,6 +426,44 @@ def get_fts_content_by_ids(ids):
     rows = cur.fetchall()
     conn.close()
     return {int(r["id"]): (r["content"] or "") for r in rows}
+
+
+def get_file_record(
+    *,
+    path: str | None = None,
+    file_id: int | None = None,
+    matter_id: str | None = None,
+):
+    if path is None and file_id is None:
+        raise ValueError("path or file_id is required")
+
+    where = []
+    params: list[object] = []
+    if path is not None:
+        where.append("path = ?")
+        params.append(path)
+    if file_id is not None:
+        where.append("id = ?")
+        params.append(int(file_id))
+    if matter_id is not None:
+        where.append("matter_id = ?")
+        params.append(matter_id)
+
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            f"""
+            SELECT id, path, filename, category, matter_id, mtime, content
+            FROM files
+            WHERE {' AND '.join(where)}
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            params,
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 def get_file_mtime(path: str):
     conn = get_conn()

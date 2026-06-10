@@ -188,3 +188,76 @@ def test_turso_backend_selected_from_dotenv(monkeypatch: pytest.MonkeyPatch, tmp
     db_mod = importlib.reload(db_mod)
 
     assert db_mod.using_turso()
+
+
+def test_search_can_filter_by_matter_id(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    db_mod, search_mod = _reload_text_modules(monkeypatch, tmp_path)
+    db_mod.upsert_file(
+        path="/tmp/matter_a.txt",
+        filename="matter_a.txt",
+        category="brief",
+        mtime=1.0,
+        content="workflow automation platform for brightops matter alpha",
+        matter_id="matter-alpha",
+    )
+    db_mod.upsert_file(
+        path="/tmp/matter_b.txt",
+        filename="matter_b.txt",
+        category="brief",
+        mtime=2.0,
+        content="workflow automation platform for unrelated matter beta",
+        matter_id="matter-beta",
+    )
+
+    engine = search_mod.TextSearchEngineV2()
+    rows = engine.search("workflow automation platform", top_k=5, matter_id="matter-alpha")
+
+    assert rows
+    assert all(row.get("matter_id") == "matter-alpha" for row in rows)
+    assert rows[0]["path"] == "/tmp/matter_a.txt"
+
+
+def test_text_upsert_and_file_content_api_functions(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setenv("CONTEXTCORE_STORAGE_DIR", str(tmp_path))
+    monkeypatch.setenv("CONTEXTCORE_TEXT_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("CONTEXTCORE_PREWARM_ON_STARTUP", "0")
+    monkeypatch.setenv("CONTEXTCORE_ENABLE_WATCHER", "0")
+    monkeypatch.setenv("CONTEXTCORE_STARTUP_SCAN", "0")
+
+    import config as config_mod
+    import text_search_implementation_v2.db as db_mod
+    import text_search_implementation_v2.search as search_mod
+    import unimain as unimain_mod
+
+    config_mod._config_cache = None
+    config_mod._env_loaded = False
+    config_mod = importlib.reload(config_mod)
+    db_mod = importlib.reload(db_mod)
+    search_mod = importlib.reload(search_mod)
+    unimain_mod = importlib.reload(unimain_mod)
+    db_mod.init_db()
+
+    payload = unimain_mod.TextUpsertRequest(
+        path="/virtual/matters/doc1.txt",
+        filename="doc1.txt",
+        category="matter_upload",
+        matter_id="matter-123",
+        mtime=123.0,
+        content="This Master Services Agreement is for BrightOps Solutions Private Limited.",
+    )
+    upserted = unimain_mod.text_upsert(payload)
+    assert upserted["ok"] is True
+    assert upserted["file"]["matter_id"] == "matter-123"
+
+    content = unimain_mod.text_file_content(
+        path="/virtual/matters/doc1.txt",
+        file_id=None,
+        matter_id="matter-123",
+        include_chunks=True,
+        chunk_chars=300,
+        chunk_overlap=50,
+    )
+    assert content["ok"] is True
+    assert content["file"]["matter_id"] == "matter-123"
+    assert "Master Services Agreement" in content["content"]
+    assert content["chunks"]
