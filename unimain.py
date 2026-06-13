@@ -20,6 +20,7 @@ import importlib.util
 import re
 import json
 import ast
+import uuid
 from pathlib import Path
 from typing import Optional, Any
 from datetime import datetime, timezone
@@ -524,6 +525,7 @@ _text_engine = None
 _code_chunk_annoy_index = None
 _code_chunk_annoy_loaded = False
 _code_chunk_annoy_lock = threading.Lock()
+_text_turso_write_lock = threading.Lock()
 
 
 def _unload_embed_models():
@@ -554,6 +556,123 @@ def get_text_engine():
         )
         _text_engine = mod.TextSearchEngineV2()
     return _text_engine
+
+
+def _run_text_db_with_retry(
+    fn,
+    *,
+    attempts: int = 2,
+    delay_seconds: float = 0.35,
+    operation: str = "text_db",
+    request_id: str | None = None,
+    context: dict[str, Any] | None = None,
+):
+    last_exc = None
+    for attempt in range(1, max(1, int(attempts)) + 1):
+        try:
+            if attempt == 1:
+                _log_text_storage_event(
+                    "db_attempt",
+                    operation=operation,
+                    request_id=request_id,
+                    attempt=attempt,
+                    **(context or {}),
+                )
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            try:
+                from text_search_implementation_v2.db import is_probably_transient_turso_error
+            except Exception:
+                is_retryable = False
+            else:
+                is_retryable = is_probably_transient_turso_error(exc)
+
+            _log_text_storage_event(
+                "db_error",
+                operation=operation,
+                request_id=request_id,
+                attempt=attempt,
+                retryable=is_retryable,
+                error_type=type(exc).__name__,
+                error=str(exc),
+                **(context or {}),
+            )
+            if not is_retryable or attempt >= attempts:
+                raise
+            _log_text_storage_event(
+                "db_retrying",
+                operation=operation,
+                request_id=request_id,
+                attempt=attempt,
+                next_attempt=attempt + 1,
+                sleep_seconds=delay_seconds,
+                **(context or {}),
+            )
+            time.sleep(delay_seconds)
+    if last_exc:
+        raise last_exc
+
+
+def _short_text(value: Any, limit: int = 180) -> str:
+    text = str(value or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
+def _log_text_storage_event(event: str, **fields: Any) -> None:
+    ordered = [f"event={event}"]
+    for key in sorted(fields):
+        value = fields[key]
+        if value is None:
+            continue
+        ordered.append(f"{key}={_short_text(value)}")
+    print("[contextcore.text_storage] " + " | ".join(ordered))
+
+
+def _run_with_optional_turso_text_write_lock(fn, *, request_id: str | None = None, context: dict[str, Any] | None = None):
+    try:
+        from text_search_implementation_v2.db import using_turso
+    except Exception as exc:
+        _log_text_storage_event(
+            "write_lock_backend_check_failed",
+            request_id=request_id,
+            error_type=type(exc).__name__,
+            error=str(exc),
+            **(context or {}),
+        )
+        return fn()
+
+    backend_is_turso = bool(using_turso())
+    _log_text_storage_event(
+        "write_lock_backend",
+        request_id=request_id,
+        backend="turso" if backend_is_turso else "sqlite",
+        **(context or {}),
+    )
+    if not backend_is_turso:
+        _log_text_storage_event(
+            "write_lock_skipped",
+            request_id=request_id,
+            reason="backend_not_turso",
+            **(context or {}),
+        )
+        return fn()
+
+    _log_text_storage_event(
+        "write_lock_wait",
+        request_id=request_id,
+        **(context or {}),
+    )
+    with _text_turso_write_lock:
+        _log_text_storage_event(
+            "write_lock_acquired",
+            request_id=request_id,
+            **(context or {}),
+        )
+        return fn()
 
 
 def lazy_load_clip():
@@ -3468,6 +3587,14 @@ rm = ResourceManager()
 async def startup():
     init_image_meta_db()
     print("🚀 unimain started (no idle-unload — models persist until switched)")
+    if get_enable_text():
+        try:
+            from text_search_implementation_v2.db import init_db as init_text_db
+
+            _run_text_db_with_retry(init_text_db, attempts=2, delay_seconds=0.5)
+            print("✅ text storage initialized")
+        except Exception as e:
+            print("⚠️ text storage init failed:", e)
     network_bootstrap()
     auto_prewarm = os.getenv(
         "CONTEXTCORE_PREWARM_ON_STARTUP", "1"
@@ -3756,22 +3883,68 @@ class TextUpsertRequest(BaseModel):
 
 @app.post("/text/upsert")
 def text_upsert(payload: TextUpsertRequest):
+    request_id = uuid.uuid4().hex[:12]
     try:
-        from text_search_implementation_v2.db import get_file_record, init_db, upsert_file
+        from text_search_implementation_v2.db import (
+            get_file_record,
+            init_db,
+            is_probably_transient_turso_error,
+            upsert_file,
+            using_turso,
+        )
 
-        init_db()
         path = payload.path.strip()
         filename = (payload.filename or Path(path).name or "document.txt").strip()
         mtime = float(payload.mtime if payload.mtime is not None else time.time())
-        changed = upsert_file(
-            path=path,
-            filename=filename,
-            category=payload.category,
-            mtime=mtime,
-            content=payload.content,
-            matter_id=payload.matter_id,
+        log_context = {
+            "path": path,
+            "filename": filename,
+            "category": payload.category,
+            "matter_id": payload.matter_id,
+            "content_len": len(payload.content or ""),
+        }
+        _log_text_storage_event(
+            "upsert_start",
+            request_id=request_id,
+            backend="turso" if using_turso() else "sqlite",
+            **log_context,
         )
-        record = get_file_record(path=path, matter_id=payload.matter_id)
+
+        def _op():
+            def _write_once():
+                init_db()
+                changed_inner = upsert_file(
+                    path=path,
+                    filename=filename,
+                    category=payload.category,
+                    mtime=mtime,
+                    content=payload.content,
+                    matter_id=payload.matter_id,
+                )
+                record_inner = get_file_record(path=path, matter_id=payload.matter_id)
+                return changed_inner, record_inner
+
+            return _run_with_optional_turso_text_write_lock(
+                _write_once,
+                request_id=request_id,
+                context=log_context,
+            )
+
+        changed, record = _run_text_db_with_retry(
+            _op,
+            attempts=2,
+            delay_seconds=0.5,
+            operation="text_upsert",
+            request_id=request_id,
+            context=log_context,
+        )
+        _log_text_storage_event(
+            "upsert_success",
+            request_id=request_id,
+            changed=bool(changed),
+            file_id=int(record["id"]) if record else None,
+            **log_context,
+        )
         return {
             "ok": True,
             "changed": bool(changed),
@@ -3785,6 +3958,26 @@ def text_upsert(payload: TextUpsertRequest):
             },
         }
     except Exception as e:
+        if "is_probably_transient_turso_error" in locals() and is_probably_transient_turso_error(e):
+            _log_text_storage_event(
+                "upsert_failed_transient",
+                request_id=request_id,
+                error_type=type(e).__name__,
+                error=str(e),
+                path=payload.path,
+                filename=payload.filename,
+                matter_id=payload.matter_id,
+            )
+            raise HTTPException(503, f"text_storage_unavailable: {e}")
+        _log_text_storage_event(
+            "upsert_failed",
+            request_id=request_id,
+            error_type=type(e).__name__,
+            error=str(e),
+            path=payload.path,
+            filename=payload.filename,
+            matter_id=payload.matter_id,
+        )
         raise HTTPException(500, str(e))
 
 
@@ -3797,14 +3990,40 @@ def text_file_content(
     chunk_chars: int = Query(900, ge=200, le=4000),
     chunk_overlap: int = Query(120, ge=0, le=1000),
 ):
+    request_id = uuid.uuid4().hex[:12]
     try:
-        from text_search_implementation_v2.db import get_file_record, init_db
+        from text_search_implementation_v2.db import (
+            get_file_record,
+            init_db,
+            is_probably_transient_turso_error,
+        )
 
         if path is None and file_id is None:
             raise HTTPException(400, "path or file_id is required")
+        log_context = {
+            "path": path,
+            "file_id": file_id,
+            "matter_id": matter_id,
+            "include_chunks": include_chunks,
+        }
+        _log_text_storage_event(
+            "file_content_start",
+            request_id=request_id,
+            **log_context,
+        )
 
-        init_db()
-        record = get_file_record(path=path, file_id=file_id, matter_id=matter_id)
+        def _op():
+            init_db()
+            return get_file_record(path=path, file_id=file_id, matter_id=matter_id)
+
+        record = _run_text_db_with_retry(
+            _op,
+            attempts=2,
+            delay_seconds=0.5,
+            operation="text_file_content",
+            request_id=request_id,
+            context=log_context,
+        )
         if not record:
             raise HTTPException(404, "file_not_found")
 
@@ -3839,10 +4058,38 @@ def text_file_content(
                 }
                 for c in chunks
             ]
+        _log_text_storage_event(
+            "file_content_success",
+            request_id=request_id,
+            returned_file_id=int(record["id"]),
+            returned_content_len=len(out["content"]),
+            chunk_count=len(out.get("chunks", [])),
+            **log_context,
+        )
         return out
     except HTTPException:
         raise
     except Exception as e:
+        if "is_probably_transient_turso_error" in locals() and is_probably_transient_turso_error(e):
+            _log_text_storage_event(
+                "file_content_failed_transient",
+                request_id=request_id,
+                error_type=type(e).__name__,
+                error=str(e),
+                path=path,
+                file_id=file_id,
+                matter_id=matter_id,
+            )
+            raise HTTPException(503, f"text_storage_unavailable: {e}")
+        _log_text_storage_event(
+            "file_content_failed",
+            request_id=request_id,
+            error_type=type(e).__name__,
+            error=str(e),
+            path=path,
+            file_id=file_id,
+            matter_id=matter_id,
+        )
         raise HTTPException(500, str(e))
 
 

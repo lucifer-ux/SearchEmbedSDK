@@ -1,4 +1,6 @@
 import importlib
+import threading
+import time
 from typing import Any
 from pathlib import Path
 
@@ -261,3 +263,95 @@ def test_text_upsert_and_file_content_api_functions(monkeypatch: pytest.MonkeyPa
     assert content["file"]["matter_id"] == "matter-123"
     assert "Master Services Agreement" in content["content"]
     assert content["chunks"]
+
+
+def test_text_upsert_retries_transient_turso_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setenv("CONTEXTCORE_STORAGE_DIR", str(tmp_path))
+    monkeypatch.setenv("CONTEXTCORE_TEXT_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("CONTEXTCORE_PREWARM_ON_STARTUP", "0")
+    monkeypatch.setenv("CONTEXTCORE_ENABLE_WATCHER", "0")
+    monkeypatch.setenv("CONTEXTCORE_STARTUP_SCAN", "0")
+
+    import config as config_mod
+    import text_search_implementation_v2.db as db_mod
+    import unimain as unimain_mod
+
+    config_mod._config_cache = None
+    config_mod._env_loaded = False
+    config_mod = importlib.reload(config_mod)
+    db_mod = importlib.reload(db_mod)
+    unimain_mod = importlib.reload(unimain_mod)
+    db_mod.init_db()
+
+    attempts = {"count": 0}
+    real_upsert = db_mod.upsert_file
+
+    def flaky_upsert(*args, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("Hrana: http error: temporary failure in name resolution")
+        return real_upsert(*args, **kwargs)
+
+    monkeypatch.setattr(db_mod, "upsert_file", flaky_upsert)
+    monkeypatch.setattr(db_mod, "is_probably_transient_turso_error", lambda exc: "hrana" in str(exc).lower())
+
+    payload = unimain_mod.TextUpsertRequest(
+        path="/virtual/matters/retry.txt",
+        filename="retry.txt",
+        category="matter_upload",
+        matter_id="matter-retry",
+        content="retry body for transient failure coverage",
+    )
+    result = unimain_mod.text_upsert(payload)
+
+    assert result["ok"] is True
+    assert attempts["count"] == 2
+
+
+def test_turso_write_lock_serializes_calls(monkeypatch: pytest.MonkeyPatch):
+    import unimain as unimain_mod
+
+    unimain_mod = importlib.reload(unimain_mod)
+    monkeypatch.setattr(
+        "text_search_implementation_v2.db.using_turso",
+        lambda: True,
+    )
+
+    active = {"count": 0, "max": 0}
+    lock = threading.Lock()
+
+    def critical_section():
+        with lock:
+            active["count"] += 1
+            active["max"] = max(active["max"], active["count"])
+        time.sleep(0.05)
+        try:
+            return True
+        finally:
+            with lock:
+                active["count"] -= 1
+
+    results = []
+    errors = []
+
+    def worker():
+        try:
+            results.append(
+                unimain_mod._run_with_optional_turso_text_write_lock(
+                    critical_section,
+                    request_id="lock-test",
+                    context={"path": "/virtual/test.txt"},
+                )
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    assert len(results) == 3
+    assert active["max"] == 1

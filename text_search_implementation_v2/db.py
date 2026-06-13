@@ -3,6 +3,7 @@ import os
 import re
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -13,6 +14,8 @@ load_env_file()
 
 DATA_DIR = get_storage_dir() / "text_search_implementation_v2" / "storage"
 DB_PATH = DATA_DIR / "text_search_implementation_v2.db"
+_INIT_LOCK = threading.Lock()
+_INIT_DONE = False
 
 
 class _DictRow(dict):
@@ -114,6 +117,25 @@ def using_turso() -> bool:
     return bool(_turso_database_url()) or _env_bool(os.getenv("CONTEXTCORE_TEXT_USE_TURSO"))
 
 
+def is_probably_transient_turso_error(exc: Exception) -> bool:
+    if not using_turso():
+        return False
+    msg = str(exc or "").lower()
+    markers = (
+        "hrana",
+        "dns error",
+        "connection reset",
+        "connection refused",
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "temporary failure",
+        "transport error",
+        "http error",
+    )
+    return any(marker in msg for marker in markers)
+
+
 def get_conn():
     if using_turso():
         try:
@@ -145,54 +167,63 @@ def get_conn():
 
 
 def init_db():
-    conn = get_conn()
-    with conn:
-        # metadata table
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS files (
-                id INTEGER PRIMARY KEY,
-                path TEXT UNIQUE,
-                filename TEXT,
-                category TEXT,
-                matter_id TEXT,
-                mtime REAL,
-                content TEXT
-            )
-            """
-        )
-        # Backward-compatible migration for old DBs that were missing content.
-        cols = {r["name"] for r in conn.execute("PRAGMA table_info(files)").fetchall()}
-        if "content" not in cols:
-            conn.execute("ALTER TABLE files ADD COLUMN content TEXT")
-        if "matter_id" not in cols:
-            conn.execute("ALTER TABLE files ADD COLUMN matter_id TEXT")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_files_matter_id ON files(matter_id)")
+    global _INIT_DONE
+    if _INIT_DONE:
+        return
 
-        if using_turso():
-            _init_turso_fts(conn)
-        else:
-            # FTS5 virtual table for content + filename
+    with _INIT_LOCK:
+        if _INIT_DONE:
+            return
+
+        conn = get_conn()
+        with conn:
+            # metadata table
             conn.execute(
                 """
-                CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
-                    filename, content, content='files', content_rowid='id', tokenize='porter'
-                );
+                CREATE TABLE IF NOT EXISTS files (
+                    id INTEGER PRIMARY KEY,
+                    path TEXT UNIQUE,
+                    filename TEXT,
+                    category TEXT,
+                    matter_id TEXT,
+                    mtime REAL,
+                    content TEXT
+                )
                 """
             )
-            # Trigram lane for typo/noisy query recovery (may be unavailable on older SQLite builds).
-            try:
+            # Backward-compatible migration for old DBs that were missing content.
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(files)").fetchall()}
+            if "content" not in cols:
+                conn.execute("ALTER TABLE files ADD COLUMN content TEXT")
+            if "matter_id" not in cols:
+                conn.execute("ALTER TABLE files ADD COLUMN matter_id TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_files_matter_id ON files(matter_id)")
+
+            if using_turso():
+                _init_turso_fts(conn)
+            else:
+                # FTS5 virtual table for content + filename
                 conn.execute(
                     """
-                    CREATE VIRTUAL TABLE IF NOT EXISTS files_fts_trigram USING fts5(
-                        filename, content, content='files', content_rowid='id', tokenize='trigram'
+                    CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
+                        filename, content, content='files', content_rowid='id', tokenize='porter'
                     );
                     """
                 )
-            except sqlite3.OperationalError:
-                # Keep backward compatibility when trigram tokenizer is not supported.
-                pass
-    conn.close()
+                # Trigram lane for typo/noisy query recovery (may be unavailable on older SQLite builds).
+                try:
+                    conn.execute(
+                        """
+                        CREATE VIRTUAL TABLE IF NOT EXISTS files_fts_trigram USING fts5(
+                            filename, content, content='files', content_rowid='id', tokenize='trigram'
+                        );
+                        """
+                    )
+                except sqlite3.OperationalError:
+                    # Keep backward compatibility when trigram tokenizer is not supported.
+                    pass
+        conn.close()
+        _INIT_DONE = True
 
 
 def _init_turso_fts(conn) -> None:
